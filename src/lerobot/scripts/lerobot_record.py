@@ -235,7 +235,7 @@ class RecordConfig:
 
 
 @safe_stop_image_writer
-def record_loop(
+def record_loop(    #注释：录制循环
     robot: Robot,
     events: dict,
     fps: int,
@@ -306,7 +306,7 @@ def record_loop(
 
         # Get action from either policy or teleop
         if policy is not None and preprocessor is not None and postprocessor is not None:
-            action_values = predict_action(
+            action_values = predict_action( #注释：预测动作
                 observation=observation_frame,
                 policy=policy,
                 device=get_safe_torch_device(policy.config.device),
