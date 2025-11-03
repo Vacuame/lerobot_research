@@ -996,7 +996,7 @@ class LeRobotDataset(torch.utils.data.Dataset):
     def __len__(self):
         return self.num_frames
 
-    def __getitem__(self, idx) -> dict: #注释：dataset取单个数据的函数
+    def __getitem__(self, idx) -> dict: # dataset取单个数据的函数
         # Ensure dataset is loaded when we actually need to read from it
         self._ensure_hf_dataset_loaded()
         item = self.hf_dataset[idx]

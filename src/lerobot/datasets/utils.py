@@ -670,7 +670,7 @@ def build_dataset_frame(
         dict: A dictionary representing a single frame of data.
     """
     frame = {}
-    for key, ft in ds_features.items():
+    for key, ft in ds_features.items():# key是种类 ft是数据的信息
         if key in DEFAULT_FEATURES or not key.startswith(prefix):
             continue
         elif ft["dtype"] == "float32" and len(ft["shape"]) == 1:

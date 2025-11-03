@@ -91,7 +91,7 @@ class ACTConfig(PreTrainedConfig):
     """
 
     # 自定义参数
-    n_history_obs_states:int = 32
+    n_history_obs_states:int = 64
 
     # Input / output structure.
     n_obs_steps: int = 1
@@ -182,11 +182,11 @@ class ACTConfig(PreTrainedConfig):
 
     @property
     def action_delta_indices(self) -> list:
-        return list(range(self.chunk_size)) #注释：0,1,2,3,4,5,6...chunk_size-1
+        return list(range(self.chunk_size)) # 0,1,2,3,4,5,6...chunk_size-1
 
     @property
     def history_obs_state_delta_indices(self) -> list:
-        return list(range(-self.n_history_obs_states+1, 1))  # 注释：-steps+1...-2,-1,0（左闭右开）
+        return list(range(-self.n_history_obs_states+1, 1))  # -steps+1...-2,-1,0（左闭右开）
 
     @property
     def reward_delta_indices(self) -> None:
