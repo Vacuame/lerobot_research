@@ -35,7 +35,7 @@ from torchvision.ops.misc import FrozenBatchNorm2d
 
 from lerobot.policies.customACT.configuration_customACT import ACTConfig
 from lerobot.policies.pretrained import PreTrainedPolicy
-from lerobot.utils.constants import ACTION, OBS_ENV_STATE, OBS_IMAGES, OBS_STATE
+from lerobot.utils.constants import ACTION, OBS_ENV_STATE, OBS_IMAGES, OBS_STATE, HIS_OBS_STATES
 
 
 class ACTPolicy(PreTrainedPolicy):
@@ -263,6 +263,11 @@ class ACT(nn.Module):
           cross-attention is used as the VAE decoder. For these terms, we drop the `vae_` prefix because we
           have an option to train this model without the variational objective (in which case we drop the
           `vae_encoder` altogether, and nothing about this model has anything to do with a VAE).
+     注：本代码中使用术语`vae_encoder`、‘编码器’、`decoder`，其含义如下：
+        - `vae_encoder`遵循变分自编码器（VAE）相关文献定义，指模型中负责编码目标数据（动作序列）与条件（机器人关节空间）的部分。       
+        - 采用带交叉注意机制的Transformer模型作为VAE解码器，其编码器（非VAE编码器）与解码器（非VAE解码器）分别独立实现。
+          对于这些术语，我们省略了`vae_`前缀，因为该模型可选择性地不采用变分目标进行训练
+         （此时将完全移除`vae_encoder`，且该模型与VAE毫无关联）。
 
                                  Transformer
                                  Used alone for inference
@@ -293,7 +298,7 @@ class ACT(nn.Module):
         super().__init__()
         self.config = config
 
-        print('这是我自己的ACT')
+        print('─=≡Σ((ﾉ≧∀≦)ﾉ') # customACT标记
 
         if self.config.use_vae:
             self.vae_encoder = ACTEncoder(config, is_vae_encoder=True)
@@ -346,16 +351,23 @@ class ACT(nn.Module):
             self.encoder_env_state_input_proj = nn.Linear(
                 self.config.env_state_feature.shape[0], config.dim_model
             )
+        # 新增：历史动作embedding模块
+        if self.config.n_history_obs_states > 0:
+            self.history_obs_state_embedding = HistoryObsStateEmbedding(config)
+
         self.encoder_latent_input_proj = nn.Linear(config.latent_dim, config.dim_model)
         if self.config.image_features:
             self.encoder_img_feat_input_proj = nn.Conv2d(
                 backbone_model.fc.in_features, config.dim_model, kernel_size=1
             )
+        
         # Transformer encoder positional embeddings.
         n_1d_tokens = 1  # for the latent
         if self.config.robot_state_feature:
             n_1d_tokens += 1
         if self.config.env_state_feature:
+            n_1d_tokens += 1
+        if self.config.n_history_obs_states > 0:# 历史动作token
             n_1d_tokens += 1
         self.encoder_1d_feature_pos_embed = nn.Embedding(n_1d_tokens, config.dim_model)
         if self.config.image_features:
@@ -466,6 +478,10 @@ class ACT(nn.Module):
         # Environment state token.
         if self.config.env_state_feature:
             encoder_in_tokens.append(self.encoder_env_state_input_proj(batch[OBS_ENV_STATE]))
+        # 新增：调用历史观测状态
+        if self.config.n_history_obs_states > 0:
+            history_obs_state_embed = self.history_obs_state_embedding(batch[HIS_OBS_STATES])  # (B, D)
+            encoder_in_tokens.append(history_obs_state_embed)
 
         if self.config.image_features:
             # For a list of images, the H and W may vary but H*W is constant.
@@ -746,3 +762,53 @@ def get_activation_fn(activation: str) -> Callable:
     if activation == "glu":
         return F.glu
     raise RuntimeError(f"activation should be relu/gelu/glu, not {activation}.")
+
+#—————————————————————————————————新增：以下是自己实现的结构—————————————————————————————————
+
+# CausalConv：因果卷积，只会padding前面一边，未来信息范围不会padding
+class CausalConv1d(nn.Module): # ref: https://zhuanlan.zhihu.com/p/552216156
+    def __init__(self, in_channels, out_channels, kernel_size, dilation=1, **kwargs ): 
+        super().__init__()
+        self.padding = (kernel_size -1) * dilation # 记录感受野大小，以便在 forward 时用
+        self.conv1d = nn.Conv1d(
+            in_channels, out_channels, kernel_size , stride=1,
+            padding=0, dilation=dilation, **kwargs # 注意这里padding是0，因为后面F.pad才是真正的padding
+        )
+
+    def forward(self, x): 
+        x = F.pad(x, (self.padding , 0))
+        conv1d_out = self.conv1d(x)
+        return conv1d_out
+
+# 历史观测状态嵌入模块
+class HistoryObsStateEmbedding(nn.Module):
+    def __init__(self, config: ACTConfig):
+        super().__init__()
+        self.motion_encoder = nn.Sequential(
+            # Layer 1
+            CausalConv1d(in_channels=config.robot_state_feature.shape[0], out_channels=64, kernel_size=3),
+            nn.ReLU(),
+            nn.BatchNorm1d(64),
+            # Layer 2
+            CausalConv1d(in_channels=64, out_channels=128, kernel_size=3),
+            nn.ReLU(),
+            nn.BatchNorm1d(128),
+            # Layer 3
+            CausalConv1d(in_channels=128, out_channels=256, kernel_size=3),
+            nn.ReLU(),
+
+            nn.AdaptiveAvgPool1d(1),  # [B, 256, 16] -> [B, 256, 1]
+            nn.Flatten(start_dim=1),   # [B, 256]
+            nn.Linear(256, config.dim_model) # [B, 256]
+        )
+    def forward(self, x): 
+        # 输入x: [B, T, state_dim]
+        x = x.permute(0, 2, 1)  # [B, state_dim, T]
+        x = self.motion_encoder(x) # [B, dim_model]
+        return x
+
+
+
+
+
+
