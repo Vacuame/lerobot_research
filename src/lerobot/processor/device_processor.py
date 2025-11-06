@@ -37,8 +37,10 @@ class DeviceProcessorStep(ProcessorStep):
     """
     Processor step to move all tensors within an `EnvTransition` to a specified device and optionally cast their
     floating-point data type.
+    处理器步骤，将“EnvTransition”中的所有张量移动到指定的设备并可选地强制转换其浮点数据类型。
 
     This is crucial for preparing data for model training or inference on hardware like GPUs.
+    这对于在GPU等硬件上为模型训练或推理准备数据至关重要。
 
     Attributes:
         device: The target device for tensors (e.g., "cpu", "cuda", "cuda:0").

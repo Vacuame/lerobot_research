@@ -458,10 +458,9 @@ def record(cfg: RecordConfig) -> LeRobotDataset: # 实际开始录制
         )
 
     #新增：特判customACT，创建滑动队列
-    #debug 这里先强制True测试
-    if(True or policy is not None and isinstance(cfg.policy, CustomACTConfig)):
+    if(policy is not None and isinstance(cfg.policy, CustomACTConfig)):
         global obs_window
-        obs_window = deque(maxlen=64)#cfg.policy.n_history_obs_states)
+        obs_window = deque(cfg.policy.n_history_obs_states)
 
     robot.connect()
     if teleop is not None:

@@ -90,7 +90,7 @@ class ACTConfig(PreTrainedConfig):
             is enabled. Loss is then calculated as: `reconstruction_loss + kl_weight * kld_loss`.
     """
 
-    # 自定义参数
+    # 新增：自定义参数
     n_history_obs_states:int = 64
 
     # Input / output structure.
@@ -185,8 +185,8 @@ class ACTConfig(PreTrainedConfig):
         return list(range(self.chunk_size)) # 0,1,2,3,4,5,6...chunk_size-1
 
     @property
-    def history_obs_state_delta_indices(self) -> list:
-        return list(range(-self.n_history_obs_states+1, 1))  # -steps+1...-2,-1,0（左闭右开）
+    def history_obs_state_delta_indices(self) -> list: # -steps+1...-2,-1,0（左闭右开）
+        return list(range(-self.n_history_obs_states+1, 1)) if( self.n_history_obs_states > 0 ) else None 
 
     @property
     def reward_delta_indices(self) -> None:

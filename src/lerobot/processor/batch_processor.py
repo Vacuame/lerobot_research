@@ -198,10 +198,13 @@ class AddBatchDimensionComplementaryDataStep(ComplementaryDataProcessorStep):
 class AddBatchDimensionProcessorStep(ProcessorStep):
     """
     A composite processor step that adds a batch dimension to the entire environment transition.
+    向整个环境转换添加批处理维度的复合处理器步骤。
 
     This step combines individual processors for actions, observations, and complementary data
     to create a batched transition (batch size 1) from a single-instance transition.
-
+    此步骤将单个处理器用于操作、观察和补充数据
+    从单个实例转换创建批处理转换（批处理大小1）。
+    
     Attributes:
         to_batch_action_processor: Processor for the action component.
         to_batch_observation_processor: Processor for the observation component.

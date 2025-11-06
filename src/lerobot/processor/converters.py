@@ -23,7 +23,7 @@ from typing import Any
 import numpy as np
 import torch
 
-from lerobot.utils.constants import ACTION, DONE, OBS_PREFIX, REWARD, TRUNCATED
+from lerobot.utils.constants import ACTION, DONE, OBS_PREFIX, REWARD, TRUNCATED, HIS_OBS_STATES
 
 from .core import EnvTransition, PolicyAction, RobotAction, RobotObservation, TransitionKey
 
@@ -173,7 +173,7 @@ def _extract_complementary_data(batch: dict[str, Any]) -> dict[str, Any]:
 
     return {**pad_keys, **task_key, **index_key, **task_index_key}
 
-
+#新增：添加 history_obs_states
 def create_transition(
     observation: dict[str, Any] | None = None,
     action: PolicyAction | RobotAction | None = None,
@@ -182,6 +182,7 @@ def create_transition(
     truncated: bool = False,
     info: dict[str, Any] | None = None,
     complementary_data: dict[str, Any] | None = None,
+    history_obs_states: PolicyAction | RobotAction | None = None,
 ) -> EnvTransition:
     """
     Create an `EnvTransition` dictionary with sensible defaults.
@@ -206,6 +207,7 @@ def create_transition(
         TransitionKey.TRUNCATED: truncated,
         TransitionKey.INFO: info if info is not None else {},
         TransitionKey.COMPLEMENTARY_DATA: complementary_data if complementary_data is not None else {},
+        TransitionKey.HIS_OBS_STATES: history_obs_states,
     }
 
 
@@ -347,10 +349,11 @@ def batch_to_transition(batch: dict[str, Any]) -> EnvTransition:
     action = batch.get(ACTION)
     if action is not None and not isinstance(action, PolicyAction):
         raise ValueError(f"Action should be a PolicyAction type got {type(action)}")
-
     # Extract observation and complementary data keys.
+    #新增：将history从batch加入transition
     observation_keys = {k: v for k, v in batch.items() if k.startswith(OBS_PREFIX)}
     complementary_data = _extract_complementary_data(batch)
+    history_obs_states = batch.get(HIS_OBS_STATES)
 
     return create_transition(
         observation=observation_keys if observation_keys else None,
@@ -360,6 +363,7 @@ def batch_to_transition(batch: dict[str, Any]) -> EnvTransition:
         truncated=batch.get(TRUNCATED, False),
         info=batch.get("info", {}),
         complementary_data=complementary_data if complementary_data else None,
+        history_obs_states=history_obs_states,
     )
 
 
@@ -384,6 +388,8 @@ def transition_to_batch(transition: EnvTransition) -> dict[str, Any]:
         DONE: transition.get(TransitionKey.DONE, False),
         TRUNCATED: transition.get(TransitionKey.TRUNCATED, False),
         "info": transition.get(TransitionKey.INFO, {}),
+        #新增：将history放回batch
+        HIS_OBS_STATES: transition.get(TransitionKey.HIS_OBS_STATES),
     }
 
     # Add complementary data.

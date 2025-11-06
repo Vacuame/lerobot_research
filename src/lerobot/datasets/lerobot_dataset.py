@@ -951,7 +951,7 @@ class LeRobotDataset(torch.utils.data.Dataset):
         #     for key, q_idx in query_indices.items()
         #     if key not in self.meta.video_keys
         # }
-        #修改
+        #新增：特判HIS_OBS_STATES
         res = {}
         for key, q_idx in query_indices.items():
             if key in self.meta.video_keys:
