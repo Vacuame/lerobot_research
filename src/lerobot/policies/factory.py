@@ -29,6 +29,7 @@ from lerobot.datasets.utils import dataset_to_policy_features
 from lerobot.envs.configs import EnvConfig
 from lerobot.envs.utils import env_to_policy_features
 from lerobot.policies.act.configuration_act import ACTConfig
+from lerobot.policies.customACT.configuration_customACT import ACTConfig as CustomACTConfig
 from lerobot.policies.diffusion.configuration_diffusion import DiffusionConfig
 from lerobot.policies.groot.configuration_groot import GrootConfig
 from lerobot.policies.pi0.configuration_pi0 import PI0Config
@@ -78,6 +79,10 @@ def get_policy_class(name: str) -> type[PreTrainedPolicy]:
         from lerobot.policies.act.modeling_act import ACTPolicy
 
         return ACTPolicy
+    elif name == "customACT":
+
+        from lerobot.policies.customACT.modeling_customACT import ACTPolicy as CustomACTPolicy
+        return CustomACTPolicy
     elif name == "vqbet":
         from lerobot.policies.vqbet.modeling_vqbet import VQBeTPolicy
 
@@ -135,6 +140,8 @@ def make_policy_config(policy_type: str, **kwargs) -> PreTrainedConfig:
         return DiffusionConfig(**kwargs)
     elif policy_type == "act":
         return ACTConfig(**kwargs)
+    elif policy_type == "customACT":
+        return CustomACTConfig(**kwargs)    
     elif policy_type == "vqbet":
         return VQBeTConfig(**kwargs)
     elif policy_type == "pi0":
@@ -183,14 +190,19 @@ def make_pre_post_processors(
     PolicyProcessorPipeline[dict[str, Any], dict[str, Any]],
     PolicyProcessorPipeline[PolicyAction, PolicyAction],
 ]:
+    # 创建数据处理器，使不同模型统一输入输出格式。
+    # 预处理器将batch处理成模型需要的相应格式，例如重命名、裁切时间轴、归一化、打包成模型输入结构等。
+    # 后处理器将模型输出处理成环境需要的格式，例如拆包动作、反归一化、截取动作维度。
     """
     Create or load pre- and post-processor pipelines for a given policy.
-
+    为给定策略创建或加载预处理器和后处理器管道。
     This function acts as a factory. It can either load existing processor pipelines
     from a pretrained path or create new ones from scratch based on the policy
     configuration. Each policy type has a dedicated factory function for its
     processors (e.g., `make_tdmpc_pre_post_processors`).
-
+    该函数作为工厂使用。它既可从预训练路径加载现有处理器管道，也可根据策略配置从头创建新管道。
+    每种策略类型都有专属的处理器工厂函数（例如 `make_tdmpc_pre_post_processors`）。
+    
     Args:
         policy_cfg: The configuration of the policy for which to create processors.
         pretrained_path: An optional path to load pretrained processor pipelines from.
@@ -267,6 +279,14 @@ def make_pre_post_processors(
 
     elif isinstance(policy_cfg, ACTConfig):
         from lerobot.policies.act.processor_act import make_act_pre_post_processors
+
+        processors = make_act_pre_post_processors(
+            config=policy_cfg,
+            dataset_stats=kwargs.get("dataset_stats"),
+        )
+
+    elif isinstance(policy_cfg, CustomACTConfig):
+        from lerobot.policies.customACT.processor_customACT import make_act_pre_post_processors
 
         processors = make_act_pre_post_processors(
             config=policy_cfg,

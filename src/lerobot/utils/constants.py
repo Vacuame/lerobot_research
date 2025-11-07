@@ -26,6 +26,7 @@ OBS_IMAGES = OBS_IMAGE + "s"
 OBS_LANGUAGE = OBS_STR + ".language"
 OBS_LANGUAGE_TOKENS = OBS_LANGUAGE + ".tokens"
 OBS_LANGUAGE_ATTENTION_MASK = OBS_LANGUAGE + ".attention_mask"
+HIS_OBS_STATES = "history_obs_states" #新增
 
 ACTION = "action"
 REWARD = "next.reward"

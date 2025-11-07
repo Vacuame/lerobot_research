@@ -80,6 +80,12 @@ from lerobot.datasets.video_utils import VideoEncodingManager
 from lerobot.policies.factory import make_policy, make_pre_post_processors
 from lerobot.policies.pretrained import PreTrainedPolicy
 from lerobot.policies.utils import make_robot_action
+#新增：import
+from lerobot.policies.customACT.configuration_customACT import ACTConfig as CustomACTConfig
+from lerobot.utils.constants import OBS_STATE, HIS_OBS_STATES
+from collections import deque
+import torch
+#
 from lerobot.processor import (
     PolicyAction,
     PolicyProcessorPipeline,
@@ -233,9 +239,11 @@ class RecordConfig:
                   ( Rerun Log / Loop Wait )
 """
 
+#新增：滑动窗口
+obs_window: deque[torch.Tensor] | None = None
 
 @safe_stop_image_writer
-def record_loop(
+def record_loop(    # 录制循环
     robot: Robot,
     events: dict,
     fps: int,
@@ -301,13 +309,22 @@ def record_loop(
         # Applies a pipeline to the raw robot observation, default is IdentityProcessor
         obs_processed = robot_observation_processor(obs)
 
+        #注意：observation_frame会并入frame，最终存入dataset，所以不能直接改
         if policy is not None or dataset is not None:
             observation_frame = build_dataset_frame(dataset.features, obs_processed, prefix=OBS_STR)
 
-        # Get action from either policy or teleop
+        #新增：给frame加入滑动窗口数据（如果需要）
+        frame_for_policy = observation_frame.copy() # 浅拷贝
+        if obs_window is not None:
+            cur_obs_state = torch.as_tensor(observation_frame[OBS_STATE],dtype=torch.float32)
+            obs_window.append(cur_obs_state)
+            history_obs_states = torch.stack(list(obs_window), dim=0)
+            frame_for_policy[HIS_OBS_STATES] = history_obs_states
+
+        # policy操控
         if policy is not None and preprocessor is not None and postprocessor is not None:
-            action_values = predict_action(
-                observation=observation_frame,
+            action_values = predict_action( # 预测动作
+                observation=frame_for_policy,
                 policy=policy,
                 device=get_safe_torch_device(policy.config.device),
                 preprocessor=preprocessor,
@@ -319,6 +336,7 @@ def record_loop(
 
             act_processed_policy: RobotAction = make_robot_action(action_values, dataset.features)
 
+        # teleop操控
         elif policy is None and isinstance(teleop, Teleoperator):
             act = teleop.get_action()
 
@@ -370,7 +388,7 @@ def record_loop(
 
 
 @parser.wrap()
-def record(cfg: RecordConfig) -> LeRobotDataset:
+def record(cfg: RecordConfig) -> LeRobotDataset: # 实际开始录制
     init_logging()
     logging.info(pformat(asdict(cfg)))
     if cfg.display_data:
@@ -439,6 +457,11 @@ def record(cfg: RecordConfig) -> LeRobotDataset:
             },
         )
 
+    #新增：特判customACT，创建滑动队列
+    if(policy is not None and isinstance(cfg.policy, CustomACTConfig)):
+        global obs_window
+        obs_window = deque(cfg.policy.n_history_obs_states)
+
     robot.connect()
     if teleop is not None:
         teleop.connect()
@@ -449,7 +472,7 @@ def record(cfg: RecordConfig) -> LeRobotDataset:
         recorded_episodes = 0
         while recorded_episodes < cfg.dataset.num_episodes and not events["stop_recording"]:
             log_say(f"Recording episode {dataset.num_episodes}", cfg.play_sounds)
-            record_loop(
+            record_loop(    # 实际录制一帧
                 robot=robot,
                 events=events,
                 fps=cfg.dataset.fps,

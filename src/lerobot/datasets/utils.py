@@ -670,7 +670,7 @@ def build_dataset_frame(
         dict: A dictionary representing a single frame of data.
     """
     frame = {}
-    for key, ft in ds_features.items():
+    for key, ft in ds_features.items():# key是种类 ft是数据的信息
         if key in DEFAULT_FEATURES or not key.startswith(prefix):
             continue
         elif ft["dtype"] == "float32" and len(ft["shape"]) == 1:
@@ -864,6 +864,7 @@ def check_delta_timestamps(
 
 def get_delta_indices(delta_timestamps: dict[str, list[float]], fps: int) -> dict[str, list[int]]:
     """Convert delta timestamps in seconds to delta indices in frames.
+        将以秒为单位的增量时间戳转换为以帧为单位的增量索引
 
     Args:
         delta_timestamps (dict): A dictionary of time deltas in seconds.
@@ -875,9 +876,7 @@ def get_delta_indices(delta_timestamps: dict[str, list[float]], fps: int) -> dic
     delta_indices = {}
     for key, delta_ts in delta_timestamps.items():
         delta_indices[key] = [round(d * fps) for d in delta_ts]
-
     return delta_indices
-
 
 def cycle(iterable: Any) -> Iterator[Any]:
     """Create a dataloader-safe cyclical iterator.

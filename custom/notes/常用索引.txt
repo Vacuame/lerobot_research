@@ -1,0 +1,9 @@
+
+训练设置
+train.py/class TrainPipelineConfig
+
+模型设置
+class ACTConfig
+
+录制循环
+lerobot_record.py/def record_loop

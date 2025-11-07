@@ -34,6 +34,7 @@ from huggingface_hub.errors import RevisionNotFoundError
 
 from lerobot.datasets.compute_stats import aggregate_stats, compute_episode_stats
 from lerobot.datasets.image_writer import AsyncImageWriter, write_image
+from lerobot.utils.constants import OBS_STATE, HIS_OBS_STATES
 from lerobot.datasets.utils import (
     DEFAULT_EPISODES_PATH,
     DEFAULT_FEATURES,
@@ -913,7 +914,7 @@ class LeRobotDataset(torch.utils.data.Dataset):
         ep_start = ep["dataset_from_index"]
         ep_end = ep["dataset_to_index"]
         query_indices = {
-            key: [max(ep_start, min(ep_end - 1, idx + delta)) for delta in delta_idx]
+            key: [max(ep_start, min(ep_end - 1, idx + delta)) for delta in delta_idx] #取episode范围内的帧index
             for key, delta_idx in self.delta_indices.items()
         }
         padding = {  # Pad values outside of current episode range
@@ -940,11 +941,26 @@ class LeRobotDataset(torch.utils.data.Dataset):
         return query_timestamps
 
     def _query_hf_dataset(self, query_indices: dict[str, list[int]]) -> dict:
-        return {
-            key: torch.stack(self.hf_dataset[q_idx][key])
-            for key, q_idx in query_indices.items()
-            if key not in self.meta.video_keys
-        }
+        #原文
+        # '''python语法解释
+        #     返回torch.stack，内容是query_indices.items()的key与q_idx作为索引到hf_dataset，
+        #     其中有if条件过滤掉meta.video_keys中的key
+        # '''
+        # return {
+        #     key: torch.stack(self.hf_dataset[q_idx][key])
+        #     for key, q_idx in query_indices.items()
+        #     if key not in self.meta.video_keys
+        # }
+        #新增：特判HIS_OBS_STATES
+        res = {}
+        for key, q_idx in query_indices.items():
+            if key in self.meta.video_keys:
+                continue
+            dataset_key = key
+            if key == HIS_OBS_STATES:
+                dataset_key = OBS_STATE
+            res[key] = torch.stack(self.hf_dataset[q_idx][dataset_key])
+        return res
 
     def _query_videos(self, query_timestamps: dict[str, list[float]], ep_idx: int) -> dict[str, torch.Tensor]:
         """Note: When using data workers (e.g. DataLoader with num_workers>0), do not call this function
@@ -980,7 +996,7 @@ class LeRobotDataset(torch.utils.data.Dataset):
     def __len__(self):
         return self.num_frames
 
-    def __getitem__(self, idx) -> dict:
+    def __getitem__(self, idx) -> dict: # dataset取单个数据的函数
         # Ensure dataset is loaded when we actually need to read from it
         self._ensure_hf_dataset_loaded()
         item = self.hf_dataset[idx]

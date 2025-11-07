@@ -17,6 +17,7 @@ import logging
 from pprint import pformat
 
 import torch
+from typing import cast
 
 from lerobot.configs.policies import PreTrainedConfig
 from lerobot.configs.train import TrainPipelineConfig
@@ -27,7 +28,8 @@ from lerobot.datasets.lerobot_dataset import (
 )
 from lerobot.datasets.streaming_dataset import StreamingLeRobotDataset
 from lerobot.datasets.transforms import ImageTransforms
-from lerobot.utils.constants import ACTION, OBS_PREFIX, REWARD
+from lerobot.utils.constants import ACTION, OBS_PREFIX, REWARD, OBS_STATE, HIS_OBS_STATES
+from lerobot.policies.customACT.configuration_customACT import ACTConfig as CustomACTConfig
 
 IMAGENET_STATS = {
     "mean": [[[0.485]], [[0.456]], [[0.406]]],  # (c,1,1)
@@ -57,11 +59,15 @@ def resolve_delta_timestamps(
     for key in ds_meta.features:
         if key == REWARD and cfg.reward_delta_indices is not None:
             delta_timestamps[key] = [i / ds_meta.fps for i in cfg.reward_delta_indices]
-        if key == ACTION and cfg.action_delta_indices is not None:
+        if key == ACTION and cfg.action_delta_indices is not None: #[0,99] / 30fps = [0s,3.3s]
             delta_timestamps[key] = [i / ds_meta.fps for i in cfg.action_delta_indices]
         if key.startswith(OBS_PREFIX) and cfg.observation_delta_indices is not None:
             delta_timestamps[key] = [i / ds_meta.fps for i in cfg.observation_delta_indices]
-
+        if isinstance(cfg, CustomACTConfig): #新增：读customACT特有的history_obs_state设置
+            customact_cfg = cast(CustomACTConfig, cfg) #问题：为什么在这里/fps转换为时间，之后又*fps转换为帧数？总之先按他的来吧
+            if key == OBS_STATE and customact_cfg.history_obs_state_delta_indices is not None:#[-31,0] /30fps = [-1.033s,0s]
+                delta_timestamps[HIS_OBS_STATES] = [i / ds_meta.fps for i in customact_cfg.history_obs_state_delta_indices]
+    
     if len(delta_timestamps) == 0:
         delta_timestamps = None
 

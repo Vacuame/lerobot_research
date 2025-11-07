@@ -323,7 +323,7 @@ def train(cfg: TrainPipelineConfig, accelerator: Accelerator | None = None):
     if is_main_process:
         logging.info("Start offline training on a fixed dataset")
 
-    for _ in range(step, cfg.steps):
+    for _ in range(step, cfg.steps):    # 开始循环
         start_time = time.perf_counter()
         batch = next(dl_iter)
         batch = preprocessor(batch)

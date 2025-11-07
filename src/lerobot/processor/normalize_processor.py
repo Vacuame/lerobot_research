@@ -402,10 +402,14 @@ class _NormalizationMixin:
 class NormalizerProcessorStep(_NormalizationMixin, ProcessorStep):
     """
     A processor step that applies normalization to observations and actions in a transition.
+    对转换中的观察和操作应用规范化的处理器步骤。
 
     This class uses the logic from `_NormalizationMixin` to perform forward normalization
     (e.g., scaling data to have zero mean and unit variance, or to the range [-1, 1]).
     It is typically used in the pre-processing pipeline before feeding data to a policy.
+    此类使用来自“%u NormalizationMixin”的逻辑执行前向规范化
+    （例如，将数据缩放为零均值和单位方差，或缩放至范围[-1，1]）。
+    它通常在将数据馈送到策略之前的预处理管道中使用。
     """
 
     @classmethod

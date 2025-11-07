@@ -27,6 +27,7 @@ class TransitionKey(str, Enum):
     """Keys for accessing EnvTransition dictionary components."""
 
     # TODO(Steven): Use consts
+    # 新增：添加 HIS_OBS_STATES
     OBSERVATION = "observation"
     ACTION = "action"
     REWARD = "reward"
@@ -34,6 +35,7 @@ class TransitionKey(str, Enum):
     TRUNCATED = "truncated"
     INFO = "info"
     COMPLEMENTARY_DATA = "complementary_data"
+    HIS_OBS_STATES = "history_obs_states"
 
 
 PolicyAction: TypeAlias = torch.Tensor
@@ -42,11 +44,13 @@ EnvAction: TypeAlias = np.ndarray
 RobotObservation: TypeAlias = dict[str, Any]
 
 
+# 新增：添加 TransitionKey.HIS_OBS_STATES
 EnvTransition = TypedDict(
     "EnvTransition",
     {
         TransitionKey.OBSERVATION.value: dict[str, Any] | None,
         TransitionKey.ACTION.value: PolicyAction | RobotAction | EnvAction | None,
+        TransitionKey.HIS_OBS_STATES.value: PolicyAction | RobotAction | EnvAction | None,
         TransitionKey.REWARD.value: float | torch.Tensor | None,
         TransitionKey.DONE.value: bool | torch.Tensor | None,
         TransitionKey.TRUNCATED.value: bool | torch.Tensor | None,
