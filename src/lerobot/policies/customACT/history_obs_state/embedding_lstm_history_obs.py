@@ -1,16 +1,21 @@
 import torch
 import torch.nn as nn
-
+from lerobot.policies.customACT.configuration_customACT import ACTConfig
+from lerobot.policies.customACT.history_obs_state.configuration_history_obs import HistoryLSTMConfig
 class HistoryLstmEmbedding(nn.Module):
-    def __init__(self, input_size=6, hidden_size=64, feature_dim=512, num_layers=1):
+    # ,input_size=6, hidden_size=64, feature_dim=512, num_layers=1
+    def __init__(self, config: ACTConfig, modeling_config: HistoryLSTMConfig):
         super().__init__()
+        input_size = modeling_config.input_size
+        hidden_size = modeling_config.hidden_size
+        num_layers = modeling_config.num_layers
         self.lstm = nn.LSTM(
             input_size=input_size,
             hidden_size=hidden_size,
             num_layers=num_layers,
             batch_first=True  # 让输入支持 (batch, seq_len, input_size)
         )
-        self.fc = nn.Linear(hidden_size * 2, feature_dim)
+        self.fc = nn.Linear(hidden_size * 2, config.dim_model)  # 将隐藏状态和细胞状态拼接后映射到特征维度
 
     def forward(self, sequence):
         """

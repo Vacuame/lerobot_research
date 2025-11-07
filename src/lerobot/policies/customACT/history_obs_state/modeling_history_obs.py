@@ -11,7 +11,7 @@ class HistoryObsStateEmbedding(nn.Module):
         if(history_obs_config.embedding_type == "conv1d"):
             self.historyobs_embedding = HistoryConv1dEmbedding(act_config, HistoryConv1dConfig())
         else:
-            self.historyobs_embedding = HistoryLstmEmbedding()
+            self.historyobs_embedding = HistoryLstmEmbedding(act_config)
     def forward(self, x):
         out = self.historyobs_embedding(x)
         return out  # [1,512]

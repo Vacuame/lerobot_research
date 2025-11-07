@@ -1,4 +1,7 @@
-
+class HistoryLSTMConfig:
+    input_size=6
+    hidden_size=64
+    num_layers=1
 class HistoryObsConfig:
     embedding_type: str = 'conv1d'
 

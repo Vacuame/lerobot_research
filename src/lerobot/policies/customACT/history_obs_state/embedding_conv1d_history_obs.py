@@ -97,6 +97,6 @@ class HistoryConv1dEmbedding(nn.Module): # 卷积特征
         x = x.permute(0, 2, 1)  # [B, state_dim, T]
         feat = self.motion_encoder(x)     # [B, 256, T]
         pooled = self.segment_pool(feat)  # [B, 256, num_segments]
-        out = self.proj(pooled)           # [B, dim_model]
+        out = self.proj(pooled)           # [B, dim_model]=[batch_size,512]
         return out
 
