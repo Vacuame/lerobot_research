@@ -37,6 +37,8 @@ from lerobot.policies.customACT.configuration_customACT import ACTConfig
 from lerobot.policies.pretrained import PreTrainedPolicy
 from lerobot.utils.constants import ACTION, OBS_ENV_STATE, OBS_IMAGES, OBS_STATE, HIS_OBS_STATES
 
+#新增：自己的import
+from lerobot.policies.customACT.history_obs_state.modeling_history_obs import HistoryObsStateEmbedding
 
 class ACTPolicy(PreTrainedPolicy):
     """
@@ -762,53 +764,6 @@ def get_activation_fn(activation: str) -> Callable:
     if activation == "glu":
         return F.glu
     raise RuntimeError(f"activation should be relu/gelu/glu, not {activation}.")
-
-#—————————————————————————————————新增：以下是自己实现的结构—————————————————————————————————
-
-# CausalConv：因果卷积，只会padding前面一边，未来信息范围不会padding
-class CausalConv1d(nn.Module): # ref: https://zhuanlan.zhihu.com/p/552216156
-    def __init__(self, in_channels, out_channels, kernel_size, dilation=1, **kwargs ): 
-        super().__init__()
-        self.padding = (kernel_size -1) * dilation # 记录感受野大小，以便在 forward 时用
-        self.conv1d = nn.Conv1d(
-            in_channels, out_channels, kernel_size , stride=1,
-            padding=0, dilation=dilation, **kwargs # 注意这里padding是0，因为后面F.pad才是真正的padding
-        )
-
-    def forward(self, x): 
-        x = F.pad(x, (self.padding , 0))
-        conv1d_out = self.conv1d(x)
-        return conv1d_out
-
-# 历史观测状态嵌入模块
-class HistoryObsStateEmbedding(nn.Module):
-    def __init__(self, config: ACTConfig):
-        super().__init__()
-        self.motion_encoder = nn.Sequential(
-            # Layer 1
-            CausalConv1d(in_channels=config.robot_state_feature.shape[0], out_channels=64, kernel_size=3),
-            nn.ReLU(),
-            nn.BatchNorm1d(64),
-            # Layer 2
-            CausalConv1d(in_channels=64, out_channels=128, kernel_size=3),
-            nn.ReLU(),
-            nn.BatchNorm1d(128),
-            # Layer 3
-            CausalConv1d(in_channels=128, out_channels=256, kernel_size=3),
-            nn.ReLU(),
-
-            nn.AdaptiveAvgPool1d(1),  # [B, 256, 16] -> [B, 256, 1]
-            nn.Flatten(start_dim=1),   # [B, 256]
-            nn.Linear(256, config.dim_model) # [B, 256]
-        )
-    def forward(self, x): 
-        # 输入x: [B, T, state_dim]
-        x = x.permute(0, 2, 1)  # [B, state_dim, T]
-        x = self.motion_encoder(x) # [B, dim_model]
-        return x
-
-
-
 
 
 

@@ -19,7 +19,6 @@ from lerobot.configs.policies import PreTrainedConfig
 from lerobot.configs.types import NormalizationMode
 from lerobot.optim.optimizers import AdamWConfig
 
-
 @PreTrainedConfig.register_subclass("customACT") #这里修改了
 @dataclass
 class ACTConfig(PreTrainedConfig):
@@ -191,4 +190,5 @@ class ACTConfig(PreTrainedConfig):
     @property
     def reward_delta_indices(self) -> None:
         return None
-    
+
+
