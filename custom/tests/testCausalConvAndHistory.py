@@ -1,6 +1,6 @@
 
 import torch
-from lerobot.policies.customACT.modeling_customACT import CausalConv1d
+from lerobot.policies.customACT.history_obs_state.embedding_conv1d_history_obs import CausalConv1d
 
 
 class CausalConv1d_QWEN(torch.nn.Module):
@@ -57,6 +57,35 @@ def testHistoryObsStateEmbedding():
     y = history_obs_state_embedding(x)
     print(y.shape)  # Expected: [B, dim_model]
 
+def split_segments(len, num, diff):
+    if not (0 <= diff <= 1):
+        raise ValueError("diff must be in [0, 1]")
+    if len < num:
+        raise ValueError("len must be >= num")
+    if num == 1:
+        return [(0, len)]
+
+    power = 1.0 - diff  # diff=0 → power=1（均匀）；diff=1 → power=0（极度前倾）
+    cuts = [0]
+    for i in range(1, num):
+        ratio = (i / num) ** (1.0 / (power + 1e-9))
+        pos = int(round(ratio * len))
+        cuts.append(max(pos, cuts[-1] + 1))  # 至少比前一个大1
+    cuts.append(len) # [0,1,8,32]
+    cuts = cuts[::-1] # [32,8,1,0]
+    
+    return [(len-cuts[i], len-cuts[i+1],cuts[i]-cuts[i+1]) for i in range(num)]
+
+def 测试分组(len,num,diff):
+    a = split_segments(len, num, diff)
+    print('x1,x2,length:')
+    print(a)
+
+    weights1 = torch.exp(torch.linspace(-2.0, 0.0, num))
+    weights2 = torch.linspace(1/num, 1.0, num)
+    print(f'Exponential weights: {weights1}   Linear weights: {weights2}')
+
 
 if __name__ == "__main__":
-    testHistoryObsStateEmbedding()
+    测试分组(64,3, 0.5)
+    
