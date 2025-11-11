@@ -1367,7 +1367,7 @@ class LeRobotDataset(torch.utils.data.Dataset):
             )
             latest_size_in_mb = get_file_size_in_mb(latest_path)
             latest_duration_in_s = latest_ep[f"videos/{video_key}/to_timestamp"][0]
-
+            # 看来现在是按文件大小来分视频，如果文件大小满了就新建一个视频文件
             if latest_size_in_mb + ep_size_in_mb >= self.meta.video_files_size_in_mb:
                 # Move temporary episode video to a new video file in the dataset
                 chunk_idx, file_idx = update_chunk_file_indices(chunk_idx, file_idx, self.meta.chunks_size)
@@ -1379,7 +1379,7 @@ class LeRobotDataset(torch.utils.data.Dataset):
                 latest_duration_in_s = 0.0
             else:
                 # Update latest video file
-                concatenate_video_files(
+                concatenate_video_files( # concatenate：串联
                     [latest_path, ep_path],
                     latest_path,
                 )

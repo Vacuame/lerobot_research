@@ -61,7 +61,6 @@ class WeightedSegmentPooling(nn.Module):
         prev = 0
         # 先每段单独池化再加权，相当于每步的权重是w/L，否则段落的长度会影响每段的权值
         for boundary in boundaries:
-                print(boundary)
                 seg = x[:, :, boundary[0]:boundary[1]]  # [B, C, L] 取时间轴的其中一段
                 seg_mean = seg.mean(dim=-1)  # [B, C] 先对段做简单平均池化（得到每段的平均值）
                 segment_feats.append(seg_mean)
