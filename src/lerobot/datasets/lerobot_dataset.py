@@ -79,6 +79,19 @@ from lerobot.utils.constants import HF_LEROBOT_HOME
 
 CODEBASE_VERSION = "v3.0"
 
+import os
+from datetime import datetime
+def get_unique_path(base_path):
+    if os.path.exists(base_path):
+        # 获取当前时间，格式为月-日-小时-分钟
+        current_time = datetime.now().strftime("%m-%d-%H-%M")
+        # 在原路径后添加时间后缀
+        unique_path = f"{base_path}_{current_time}"
+        return unique_path
+    else:
+        return base_path
+
+
 
 class LeRobotDatasetMetadata:
     def __init__(
@@ -511,6 +524,8 @@ class LeRobotDatasetMetadata:
         obj.repo_id = repo_id
         obj.root = Path(root) if root is not None else HF_LEROBOT_HOME / repo_id
 
+        #新增：录制数据时如果路径已存在，则创建一个唯一的新路径
+        obj.root = Path(get_unique_path(obj.root)) 
         obj.root.mkdir(parents=True, exist_ok=False)
 
         features = {**features, **DEFAULT_FEATURES}
