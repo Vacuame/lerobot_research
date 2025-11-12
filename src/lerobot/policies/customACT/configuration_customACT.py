@@ -18,6 +18,7 @@ from dataclasses import dataclass, field
 from lerobot.configs.policies import PreTrainedConfig
 from lerobot.configs.types import NormalizationMode
 from lerobot.optim.optimizers import AdamWConfig
+from lerobot.policies.customACT.history_obs_state.configuration_history_obs import HistoryObsConfig, HistoryLSTMConfig, HistoryConv1dConfig
 
 @PreTrainedConfig.register_subclass("customACT") #这里修改了
 @dataclass
@@ -90,7 +91,21 @@ class ACTConfig(PreTrainedConfig):
     """
 
     # 新增：自定义参数
-    n_history_obs_states:int = 64
+    n_history_obs_states:int = 64 # 若 = 0 则关闭此功能
+    
+    # 临时config: history_obs -- ho_
+    ho_type:str = 'conv1d'  # 'lstm' or 'conv1d'
+    # his_obs_config: HistoryObsConfig | None = None
+
+    # lstm params
+    ho_input_size: int = 6
+    ho_hidden_size: int = 64
+    ho_num_layers: int = 1
+    # conv1d params
+    ho_history_segment_num: int = 4
+    ho_history_segment_alpha: float = 0.5
+    ho_history_segment_decay: str = 'lienar'  # 'exponential' or 'linear' or None
+    
 
     # Input / output structure.
     n_obs_steps: int = 1
@@ -174,6 +189,22 @@ class ACTConfig(PreTrainedConfig):
     def validate_features(self) -> None:
         if not self.image_features and not self.env_state_feature:
             raise ValueError("You must provide at least one image or the environment state among the inputs.")
+
+    def get_HistoryObsConfig(self) -> HistoryObsConfig:
+        if self.ho_type == 'lstm':
+            return HistoryLSTMConfig(
+                input_size=self.ho_input_size,
+                hidden_size=self.ho_hidden_size,
+                num_layers=self.ho_num_layers
+            )
+        elif self.ho_type == 'conv1d':
+            return HistoryConv1dConfig(
+                history_segment_num=self.ho_history_segment_num,
+                history_segment_alpha=self.ho_history_segment_alpha,
+                history_segment_decay=self.ho_history_segment_decay
+            )
+        else:
+            raise ValueError(f"Unknown ho_type: {self.ho_type}")
 
     @property
     def observation_delta_indices(self) -> None:

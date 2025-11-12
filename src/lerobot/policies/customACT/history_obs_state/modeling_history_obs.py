@@ -7,11 +7,11 @@ from lerobot.policies.customACT.history_obs_state.embedding_lstm_history_obs imp
 class HistoryObsStateEmbedding(nn.Module):
     def __init__(self, act_config: ACTConfig):
         super().__init__()
-        history_obs_config = HistoryObsConfig() #TODO 参数暂时直接从类生成，之后要改
-        if(history_obs_config.embedding_type == "conv1d"):
-            self.historyobs_embedding = HistoryConv1dEmbedding(act_config, HistoryConv1dConfig())
+        history_obs_config = act_config.get_HistoryObsConfig()
+        if(history_obs_config.type == "conv1d"):
+            self.historyobs_embedding = HistoryConv1dEmbedding(act_config, history_obs_config)
         else:
-            self.historyobs_embedding = HistoryLstmEmbedding(act_config)
+            self.historyobs_embedding = HistoryLstmEmbedding(act_config, history_obs_config)
     def forward(self, x):
         out = self.historyobs_embedding(x)
-        return out  # [1,512]
+        return out  # [B,512]

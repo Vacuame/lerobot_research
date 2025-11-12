@@ -123,7 +123,7 @@ def update_policy(
     return train_metrics, output_dict
 
 
-@parser.wrap()
+@parser.wrap() # 通过这个@把参数传递给cfg
 def train(cfg: TrainPipelineConfig, accelerator: Accelerator | None = None):
     """
     Main function to train a policy.
@@ -205,6 +205,9 @@ def train(cfg: TrainPipelineConfig, accelerator: Accelerator | None = None):
         ds_meta=dataset.meta,
         rename_map=cfg.rename_map,
     )
+
+    for name, param in policy.named_parameters():
+        print(f"Parameter: {name}, Shape: {param.shape}, Requires Grad: {param.requires_grad}")
 
     # Wait for all processes to finish policy creation before continuing
     accelerator.wait_for_everyone()

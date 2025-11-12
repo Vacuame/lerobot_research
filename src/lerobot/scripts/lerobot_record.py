@@ -443,10 +443,10 @@ def record(cfg: RecordConfig) -> LeRobotDataset: # 实际开始录制
         )
 
     # Load pretrained policy
-    policy = None if cfg.policy is None else make_policy(cfg.policy, ds_meta=dataset.meta)
+    policy = None if cfg.policy is None else make_policy(cfg.policy, ds_meta=dataset.meta) # 构建了模型实例
     preprocessor = None
     postprocessor = None
-    if cfg.policy is not None:
+    if cfg.policy is not None: # 在这里载入了模型数据
         preprocessor, postprocessor = make_pre_post_processors(
             policy_cfg=cfg.policy,
             pretrained_path=cfg.policy.pretrained_path,
@@ -460,7 +460,7 @@ def record(cfg: RecordConfig) -> LeRobotDataset: # 实际开始录制
     #新增：特判customACT，创建滑动队列
     if(policy is not None and isinstance(cfg.policy, CustomACTConfig)):
         global obs_window
-        obs_window = deque(cfg.policy.n_history_obs_states)
+        obs_window = deque(maxlen=cfg.policy.n_history_obs_states)
 
     robot.connect()
     if teleop is not None:
