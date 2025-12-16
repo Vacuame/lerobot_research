@@ -1,0 +1,6 @@
+NAME            |    MIN |    POS |    MAX 
+shoulder_pan    |    764 |   2102 |   3480
+shoulder_lift   |   2042 |   2047 |   4095 
+elbow_flex      |     56 |   2050 |   2052
+wrist_flex      |    336 |   2030 |   2629 
+gripper         |   2032 |   2043 |   3272
