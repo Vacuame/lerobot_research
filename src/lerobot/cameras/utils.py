@@ -69,7 +69,8 @@ def get_cv2_backend() -> int:
     import cv2
 
     if platform.system() == "Windows":
-        return int(cv2.CAP_MSMF) if platform.release()==str(11) else int(cv2.CAP_DSHOW)  # Use DSHOW or MSMF for  Windows instead of AVFOUNDATION
+        return int(cv2.CAP_MSMF)
+        # return int(cv2.CAP_MSMF) if platform.release()==str(11) else int(cv2.CAP_DSHOW)
     # elif platform.system() == "Darwin":  # macOS
     #     return cv2.CAP_AVFOUNDATION
     else:  # Linux and others

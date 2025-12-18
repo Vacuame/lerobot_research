@@ -239,7 +239,8 @@ class RecordConfig:
                   ( Rerun Log / Loop Wait )
 """
 
-#新增：滑动窗口
+#新增：滑动窗口 
+#TODO 逻辑还有问题，无法判断是录制还是使用policy
 obs_window: deque[torch.Tensor] | None = None
 
 @safe_stop_image_writer
@@ -296,7 +297,7 @@ def record_loop(    # 录制循环
 
     timestamp = 0
     start_episode_t = time.perf_counter()
-    while timestamp < control_time_s:
+    while timestamp < control_time_s: # 实际的每一秒循环
         start_loop_t = time.perf_counter()
 
         if events["exit_early"]:
@@ -314,8 +315,8 @@ def record_loop(    # 录制循环
             observation_frame = build_dataset_frame(dataset.features, obs_processed, prefix=OBS_STR)
 
         #新增：给frame加入滑动窗口数据（如果需要）
-        frame_for_policy = observation_frame.copy() # 浅拷贝
-        if obs_window is not None:
+        if obs_window is not None and policy is not None:
+            frame_for_policy = observation_frame.copy() # 浅拷贝
             cur_obs_state = torch.as_tensor(observation_frame[OBS_STATE],dtype=torch.float32)
             obs_window.append(cur_obs_state)
             history_obs_states = torch.stack(list(obs_window), dim=0)
@@ -472,7 +473,7 @@ def record(cfg: RecordConfig) -> LeRobotDataset: # 实际开始录制
         recorded_episodes = 0
         while recorded_episodes < cfg.dataset.num_episodes and not events["stop_recording"]:
             log_say(f"Recording episode {dataset.num_episodes}", cfg.play_sounds)
-            record_loop(    # 实际录制一帧
+            record_loop(    # 实际录制一集
                 robot=robot,
                 events=events,
                 fps=cfg.dataset.fps,
