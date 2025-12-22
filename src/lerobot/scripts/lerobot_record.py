@@ -314,9 +314,11 @@ def record_loop(    # 录制循环
         if policy is not None or dataset is not None:
             observation_frame = build_dataset_frame(dataset.features, obs_processed, prefix=OBS_STR)
 
-        #新增：给frame加入滑动窗口数据（如果需要）
-        if obs_window is not None and policy is not None:
+        #新增：有policy先给它一个frame，本来不用的，这是为了加入滑动窗口
+        if policy is not None:
             frame_for_policy = observation_frame.copy() # 浅拷贝
+        # 如果之前创建了obs_window，这里就会输入进frame_for_policy
+        if obs_window is not None:
             cur_obs_state = torch.as_tensor(observation_frame[OBS_STATE],dtype=torch.float32)
             obs_window.append(cur_obs_state)
             history_obs_states = torch.stack(list(obs_window), dim=0)
