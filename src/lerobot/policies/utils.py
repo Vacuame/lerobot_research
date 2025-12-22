@@ -124,7 +124,8 @@ def prepare_observation_for_inference(
         to (C, H, W) and normalized to a [0, 1] range.
     """
     for name in observation:
-        observation[name] = torch.from_numpy(observation[name])
+        if type(observation[name]) is np.ndarray:
+            observation[name] = torch.from_numpy(observation[name])
         if "image" in name:
             observation[name] = observation[name].type(torch.float32) / 255
             observation[name] = observation[name].permute(2, 0, 1).contiguous()
