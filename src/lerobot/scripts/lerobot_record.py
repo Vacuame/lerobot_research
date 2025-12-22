@@ -84,6 +84,7 @@ from lerobot.policies.utils import make_robot_action
 from lerobot.policies.customACT.configuration_customACT import ACTConfig as CustomACTConfig
 from lerobot.utils.constants import OBS_STATE, HIS_OBS_STATES
 from collections import deque
+from lerobot.utils.custom_pad_list import pad_list_left_to_length
 import torch
 #
 from lerobot.processor import (
@@ -322,6 +323,7 @@ def record_loop(    # 录制循环
             cur_obs_state = torch.as_tensor(observation_frame[OBS_STATE],dtype=torch.float32)
             obs_window.append(cur_obs_state)
             history_obs_states = torch.stack(list(obs_window), dim=0)
+            pad_list_left_to_length(history_obs_states, obs_window.maxlen)
             frame_for_policy[HIS_OBS_STATES] = history_obs_states
 
         # policy操控
