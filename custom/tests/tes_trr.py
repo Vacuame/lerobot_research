@@ -1,6 +1,4 @@
 
-
-
 # 尝试使用rr的video stream功能，但是暂时没时间搞这个，比较复杂，先用其他方法吧
 
 """Video encode images using av and stream them to Rerun."""

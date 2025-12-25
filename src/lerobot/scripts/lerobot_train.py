@@ -206,8 +206,9 @@ def train(cfg: TrainPipelineConfig, accelerator: Accelerator | None = None):
         rename_map=cfg.rename_map,
     )
 
-    for name, param in policy.named_parameters():
-        print(f"Parameter: {name}, Shape: {param.shape}, Requires Grad: {param.requires_grad}")
+    #功能 输出模型参数信息
+    # for name, param in policy.named_parameters():
+    #     print(f"Parameter: {name}, Shape: {param.shape}, Requires Grad: {param.requires_grad}")
 
     # Wait for all processes to finish policy creation before continuing
     accelerator.wait_for_everyone()

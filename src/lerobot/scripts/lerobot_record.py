@@ -500,7 +500,7 @@ def record(cfg: RecordConfig) -> LeRobotDataset: # 实际开始录制
                 (recorded_episodes < cfg.dataset.num_episodes - 1) or events["rerecord_episode"]
             ):
                 log_say("Reset the environment", cfg.play_sounds)
-                record_loop(
+                record_loop( # 不带dataset，所以不会保存数据
                     robot=robot,
                     events=events,
                     fps=cfg.dataset.fps,
