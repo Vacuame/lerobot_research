@@ -215,7 +215,7 @@ class ACTConfig(PreTrainedConfig):
         return list(range(self.chunk_size)) # 0,1,2,3,4,5,6...chunk_size-1
 
     @property
-    def history_obs_state_delta_indices(self) -> list: # -steps+1...-2,-1,0（左闭右开）
+    def history_obs_state_delta_indices(self) -> list: # -steps+1...-2,-1,0  [-steps+1, 1)
         return list(range(-self.n_history_obs_states+1, 1)) if( self.n_history_obs_states > 0 ) else None 
 
     @property
