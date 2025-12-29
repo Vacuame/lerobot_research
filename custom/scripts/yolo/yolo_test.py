@@ -43,6 +43,37 @@ def draw_results_on_frame(model,frame,results):
             )
     return frame
 
+def yolo_seg_picture(
+    model_path="yolov8n-seg.pt",
+    picture_path="custom/tests/yolo_test/test.jpg"
+):
+    # 加载模型
+    model = YOLO(model_path)
+
+    # 读取图片
+    frame = cv2.imread(picture_path)
+    if frame is None:
+        print(f"Error: Could not read image from {picture_path}")
+        return
+
+    # YOLO 推理（直接喂 numpy）
+    results = model.track(
+            source=frame,
+            persist=True,   # 跨帧保留 tracker，不会每帧都重置
+            verbose=False,  # 不打印日志
+            conf=0.25,  # 检测置信度低于 0.25 的 bbox 会被丢弃
+            iou=0.7,    # 重叠度大于 x 的 bbox 会被合并
+            device=0,   # 使用 GPU 0
+            tracker="botsort.yaml"  # 指定用 BoT-SORT
+        )
+
+    frame = draw_results_on_frame(model,frame,results)
+
+    # 显示结果
+    cv2.imshow("YOLOv8 Segmentation Result", frame)
+    cv2.waitKey(0)  # 按任意键关闭窗口
+    cv2.destroyAllWindows()
+
 def yolo_seg_camera(
     model_path="yolov8n-seg.pt",
     cam_id=0
@@ -59,7 +90,15 @@ def yolo_seg_camera(
         if not ret:
             break
 
-        results = model.track(frame, persist=True, verbose=False)
+        results = model.track(
+            source=frame,
+            persist=True,   # 跨帧保留 tracker，不会每帧都重置
+            verbose=False,  # 不打印日志
+            conf=0.25,  # 检测置信度低于 0.25 的 bbox 会被丢弃
+            iou=0.7,    # 重叠度大于 x 的 bbox 会被合并
+            device=0,   # 使用 GPU 0
+            tracker="botsort.yaml"  # 指定用 BoT-SORT
+        )
         frame = draw_results_on_frame(model,frame,results)
 
         cv2.imshow("YOLOv8 Seg Camera", frame)
@@ -68,30 +107,6 @@ def yolo_seg_camera(
             break
 
     cap.release()
-    cv2.destroyAllWindows()
-
-def yolo_seg_picture(
-    model_path="yolov8n-seg.pt",
-    picture_path="custom/tests/yolo_test/test.jpg"
-):
-    # 加载模型
-    model = YOLO(model_path)
-    model.track()
-
-    # 读取图片
-    frame = cv2.imread(picture_path)
-    if frame is None:
-        print(f"Error: Could not read image from {picture_path}")
-        return
-
-    # YOLO 推理（直接喂 numpy）
-    results = model(frame, verbose=False)
-
-    frame = draw_results_on_frame(model,frame,results)
-
-    # 显示结果
-    cv2.imshow("YOLOv8 Segmentation Result", frame)
-    cv2.waitKey(0)  # 按任意键关闭窗口
     cv2.destroyAllWindows()
 
 from yolo_stable_id import StableObjectManager
@@ -162,9 +177,9 @@ def yolo_seg_camera_stable(
     cv2.destroyAllWindows()
 
 if __name__ == "__main__":
-    yolo_seg_camera_stable("yolov8n-seg.pt")
+    yolo_seg_camera("yolo11l-seg.pt")
 
-    #yolo_seg_picture(picture_path="custom/scripts/yolo/image/sheep.jpg")
+    #yolo_seg_picture(model_path="yolo11l-seg.pt",picture_path="custom/scripts/yolo/image/sheep.jpg")
 
     #print_label_names()
 
