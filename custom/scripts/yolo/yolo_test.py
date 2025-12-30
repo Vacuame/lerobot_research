@@ -2,7 +2,7 @@ from ultralytics import YOLO
 import cv2
 import numpy as np
 
-def print_label_names(model_path="yolov8n-seg.pt"):
+def print_label_names(model_path):
     model = YOLO(model_path)
     names = model.names
     print(names)
@@ -44,7 +44,7 @@ def draw_results_on_frame(model,frame,results):
     return frame
 
 def yolo_seg_picture(
-    model_path="yolov8n-seg.pt",
+    model_path,
     picture_path="custom/tests/yolo_test/test.jpg"
 ):
     # 加载模型
@@ -75,7 +75,7 @@ def yolo_seg_picture(
     cv2.destroyAllWindows()
 
 def yolo_seg_camera(
-    model_path="yolov8n-seg.pt",
+    model_path,
     cam_id=0
 ):
     model = YOLO(model_path)
@@ -111,7 +111,7 @@ def yolo_seg_camera(
 
 from yolo_stable_id import StableObjectManager
 def yolo_seg_camera_stable(
-    model_path="yolov8n-seg.pt",
+    model_path,
     cam_id=0
 ):
     model = YOLO(model_path)
@@ -177,9 +177,13 @@ def yolo_seg_camera_stable(
     cv2.destroyAllWindows()
 
 if __name__ == "__main__":
-    yolo_seg_camera("yolo11l-seg.pt")
+# "yolo11l-seg.pt"  "runs/segment/train4/weights/best.pt"
 
-    #yolo_seg_picture(model_path="yolo11l-seg.pt",picture_path="custom/scripts/yolo/image/sheep.jpg")
+    # yolo_seg_camera("yolo11l-seg.pt")
+
+    # yolo_seg_camera("runs/segment/train4/weights/best.pt")
+
+    yolo_seg_picture(model_path="runs/segment/train4/weights/best.pt",picture_path="custom/scripts/yolo/image/test1.jpg")
 
     #print_label_names()
 
