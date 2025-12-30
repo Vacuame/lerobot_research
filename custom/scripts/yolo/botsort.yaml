@@ -1,0 +1,9 @@
+
+track_high_thresh: 0.5 # 认为 bbox 足够可靠才会继续跟踪
+track_low_thresh: 0.1 # 在 bbox 置信度低于这个值时仍尝试保持 ID
+new_track_thresh: 0.6 # 置信度超过 0.6 时才会创建新的 ID
+
+track_buffer: 30       # 允许短时丢失帧数
+match_thresh: 0.65    # 认为是相同ID的匹配严格度，得分大于才认作同一个物体，否则新建 ID
+
+with_reid: True        # 相似外观匹配
