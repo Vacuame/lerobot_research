@@ -1,0 +1,47 @@
+
+# -------- 基本训练参数 --------
+imgsz: 640
+epochs: 180
+batch: 16
+workers: 8
+device: 0
+seed: 0
+
+# -------- 迁移学习 / 冻结 --------
+freeze: 7          # 冻结 backbone 0–6，训练高层语义 + head
+
+# -------- 优化器 / 学习率 --------
+optimizer: AdamW
+lr0: 0.002         # 初始学习率
+lrf: 0.01          # 最终学习率比例
+momentum: 0.9
+weight_decay: 0.01
+
+# -------- 早停 --------
+patience: 20       # val 指标 20 个 epoch 不提升则停止
+
+# -------- 数据增强 --------
+augment: True
+
+# 几何增强
+translate: 0.10    # 平移比例
+scale: 0.50        # 随机缩放
+shear: 0.0         # 剪切（不推荐）
+
+# 翻转
+fliplr: 0.5        # 水平翻转
+flipud: 0.0        # 垂直翻转（一般不符合物理直觉）
+
+# 组合增强
+mosaic: 1.0        # 小数据强烈推荐
+mixup: 0.0         # seg + 小数据不推荐
+copy_paste: 0.0    # seg + 小数据不推荐
+
+# 颜色增强
+hsv_h: 0.015
+hsv_s: 0.7
+hsv_v: 0.4
+
+# -------- 训练稳定性 --------
+close_mosaic: 10   # 最后 10 个 epoch 关闭 mosaic，提升 mask 精度
+cache: True        # 缓存图片，加速训练
