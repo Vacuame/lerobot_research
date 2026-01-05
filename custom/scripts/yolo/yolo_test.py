@@ -43,6 +43,14 @@ def draw_results_on_frame(model,frame,results):
             )
     return frame
 
+def resize_for_display(img, max_size=1000):
+    h, w = img.shape[:2]
+    scale = min(max_size / w, max_size / h, 1.0)  # 不放大
+    if scale < 1.0:
+        img = cv2.resize(img, (int(w * scale), int(h * scale)))
+    return img
+
+
 def yolo_seg_picture(
     model_path,
     picture_path="custom/tests/yolo_test/test.jpg"
@@ -61,16 +69,16 @@ def yolo_seg_picture(
             source=frame,
             persist=True,   # 跨帧保留 tracker，不会每帧都重置
             verbose=False,  # 不打印日志
-            conf=0.25,  # 检测置信度低于 0.25 的 bbox 会被丢弃
+            conf=0.1,  # 检测置信度低于 0.25 的 bbox 会被丢弃
             iou=0.7,    # 重叠度大于 x 的 bbox 会被合并
             device=0,   # 使用 GPU 0
             tracker="botsort.yaml"  # 指定用 BoT-SORT
         )
 
     frame = draw_results_on_frame(model,frame,results)
-
+    show = resize_for_display(frame, max_size=1000)
     # 显示结果
-    cv2.imshow("YOLOv8 Segmentation Result", frame)
+    cv2.imshow("YOLOv8 Segmentation Result", show)
     cv2.waitKey(0)  # 按任意键关闭窗口
     cv2.destroyAllWindows()
 
@@ -96,7 +104,7 @@ def yolo_seg_camera(
             verbose=False,  # 不打印日志
             conf=0.25,  # 检测置信度低于 0.25 的 bbox 会被丢弃
             iou=0.7,    # 重叠度大于 x 的 bbox 会被合并
-            device=0,   # 使用 GPU 0
+            device="cpu",   # 使用 GPU 0
             tracker="botsort.yaml"  # 指定用 BoT-SORT
         )
         frame = draw_results_on_frame(model,frame,results)
@@ -181,9 +189,9 @@ if __name__ == "__main__":
 
     # yolo_seg_camera("yolo11l-seg.pt")
 
-    # yolo_seg_camera("runs/segment/train4/weights/best.pt")
+    yolo_seg_camera("runs/segment/train9/weights/best.pt")
 
-    yolo_seg_picture(model_path="runs/segment/train4/weights/best.pt",picture_path="custom/scripts/yolo/image/test1.jpg")
+    # yolo_seg_picture(model_path="runs/segment/train8/weights/best.pt",picture_path="datasets/block/test/images/Video_1_24_jpg.rf.428ff83e29de66f38fee91f6db596aff.jpg")
 
     #print_label_names()
 
