@@ -462,8 +462,8 @@ def record(cfg: RecordConfig) -> LeRobotDataset: # 实际开始录制
             },
         )
 
-    #新增：特判customACT，创建滑动队列
-    if(policy is not None and isinstance(cfg.policy, CustomACTConfig)):
+    #新增：特判customACT，创建滑动队列 
+    if(policy is not None and isinstance(cfg.policy, CustomACTConfig) and cfg.policy.n_history_obs_states > 0):
         global obs_window
         obs_window = deque(maxlen=cfg.policy.n_history_obs_states)
 
