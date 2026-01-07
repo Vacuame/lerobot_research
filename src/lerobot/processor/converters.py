@@ -388,9 +388,11 @@ def transition_to_batch(transition: EnvTransition) -> dict[str, Any]:
         DONE: transition.get(TransitionKey.DONE, False),
         TRUNCATED: transition.get(TransitionKey.TRUNCATED, False),
         "info": transition.get(TransitionKey.INFO, {}),
-        #新增：将history放回batch
-        HIS_OBS_STATES: transition.get(TransitionKey.HIS_OBS_STATES),
     }
+    #新增：将history放回batch（如果有的话）
+    his_obs = transition.get(TransitionKey.HIS_OBS_STATES)
+    if his_obs is not None:
+        batch[HIS_OBS_STATES] = his_obs
 
     # Add complementary data.
     comp_data = transition.get(TransitionKey.COMPLEMENTARY_DATA, {})
