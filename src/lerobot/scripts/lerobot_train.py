@@ -206,7 +206,7 @@ def train(cfg: TrainPipelineConfig, accelerator: Accelerator | None = None):
         rename_map=cfg.rename_map,
     )
 
-    #功能 输出模型参数信息
+    #DEBUG 输出模型参数信息
     # for name, param in policy.named_parameters():
     #     print(f"Parameter: {name}, Shape: {param.shape}, Requires Grad: {param.requires_grad}")
 

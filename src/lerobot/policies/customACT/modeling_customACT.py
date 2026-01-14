@@ -140,7 +140,7 @@ class ACTPolicy(PreTrainedPolicy):
             batch = dict(batch)  # shallow copy so that adding a key doesn't modify the original
             batch[OBS_IMAGES] = [batch[key] for key in self.config.image_features]
 
-        #功能 输出batch的结构
+        #DEBUG 输出batch的结构
         # for key,tensor in batch.items(): # print出batch的内容，方便调试
         #     print(f"{key}: {tensor.shape if isinstance(tensor, Tensor) else type(tensor)}")
 
