@@ -17,7 +17,6 @@ def draw_results_on_frame(model,frame,results):
         masks = r.masks.data.cpu().numpy()
         boxes = r.boxes.xyxy.cpu().numpy()
         classes = r.boxes.cls.cpu().numpy()
-
         for i, mask in enumerate(masks):
             # resize mask 到原图尺寸
             mask = cv2.resize(mask, (w, h))
@@ -183,7 +182,9 @@ if __name__ == "__main__":
 
     # yolo_seg_camera("runs/segment/train4/weights/best.pt")
 
-    yolo_seg_picture(model_path="runs/segment/train4/weights/best.pt",picture_path="custom/scripts/yolo/image/test1.jpg")
+    # yolo_seg_picture(model_path="runs/segment/train4/weights/best.pt",picture_path="custom/scripts/yolo/image/test1.jpg")
+    yolo_seg_picture(model_path="yolo11l-seg.pt",picture_path="custom/scripts/yolo/image/sheep.jpg")
+
 
     #print_label_names()
 

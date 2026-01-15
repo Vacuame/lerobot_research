@@ -154,7 +154,7 @@ def teleop_loop(
         robot_action_to_send = robot_action_processor((teleop_action, obs))
 
         #DEBUG 在控制时显示末端位姿
-        from lerobot.model.custom_kinematics import SimpleKinematics
+        from lerobot.policies.customACT.segment_understanding.utils.kinematics import SimpleKinematics
         def clear_lines(n):
             """清除上方 n 行"""
             cursor_up = '\033[F'  # 移动光标到上一行开头
