@@ -2,15 +2,27 @@ from ultralytics import YOLO
 import cv2
 import numpy as np
 import torch
+from lerobot.policies.customACT.segment_understanding.configuration_segment_understanding import SegmentUnderstandingConfig
 
-class yolo_data_processer:
-    def __intit__(self):
-        pass
+class YoloDataProcessor:
+    def __init__(self, config: SegmentUnderstandingConfig):
+        self.config = config
+        self.yolo = YOLO(config.yolo_path)
+        self.ee_anchor = torch.tensor([0.5, 1.0])  # 末端锚点位置
     
-    def get_data_from_yolo():
-        pass
+    def get_data_from_yolo(self, frame):
+        results = self.yolo.track(
+            source=frame,
+            persist=True,   # 跨帧保留 tracker，不会每帧都重置
+            verbose=False,  # 不打印日志
+            conf=0.25,  # 检测置信度低于 0.25 的 bbox 会被丢弃
+            iou=0.7,    # 重叠度大于 x 的 bbox 会被合并
+            tracker=self.config.tracker_path  # 指定用 BoT-SORT
+        )
+        return self.data_process(results, self.ee_anchor)
 
-    def data_process(results, ee_anchor):
+
+    def data_process(self, results, ee_anchor):
         boxes = results.boxes
         xywhn = boxes.xywhn      # [N, 4]
         obj_xy = xywhn[:, :2]            # [N, 2]

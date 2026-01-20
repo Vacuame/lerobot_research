@@ -21,7 +21,7 @@ class SimpleKinematics:
         #     p = pose.translation
         #     print(f"{name:20s} | p = [{p[0]:7.3f}, {p[1]:7.3f}, {p[2]:7.3f}]")
 
-        return ee_pose
+        return ee_pose  # 使用之前需要展平
 
 # 使用例，暂时放在这里
 # from lerobot.model.custom_kinematics import RobotKinematics, compute_forward_kinematics_joints_to_ee,SimpleKinematics

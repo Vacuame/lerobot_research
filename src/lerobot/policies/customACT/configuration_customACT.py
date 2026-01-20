@@ -109,6 +109,7 @@ class ACTConfig(PreTrainedConfig):
     # —————————————————————————————————————————————————————————————————————————————————————
 
     # Segment understanding config
+    use_segment_understanding: bool = True
     seg_config: SegmentUnderstandingConfig = field(default_factory=SegmentUnderstandingConfig)
 
     # Input / output structure.
