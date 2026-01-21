@@ -39,6 +39,9 @@ from lerobot.utils.constants import ACTION, OBS_ENV_STATE, OBS_IMAGES, OBS_STATE
 
 #新增：自己的import
 from lerobot.policies.customACT.history_obs_state.modeling_history_obs import HistoryObsStateEmbedding
+from lerobot.policies.customACT.segment_understanding.modeling_segment_understanding import SegmentUnderstandingEmbedding
+from lerobot.policies.customACT.segment_understanding.utils.kinematics import SimpleKinematics
+from lerobot.policies.customACT.segment_understanding.utils.yolo_data_processer import YoloDataProcessor
 
 class ACTPolicy(PreTrainedPolicy):
     """
@@ -357,9 +360,22 @@ class ACT(nn.Module):
             self.encoder_env_state_input_proj = nn.Linear(
                 self.config.env_state_feature.shape[0], config.dim_model
             )
+
         # 新增：历史动作embedding模块
         if self.config.n_history_obs_states > 0:
             self.history_obs_state_embedding = HistoryObsStateEmbedding(config)
+
+        # 新增：实例分割理解模块
+        if self.config.use_segment_understanding:
+            # 初始化两个必需的插件：FK & YOLO
+            self.kinematics = SimpleKinematics(config.seg_config.urdf_path, config.seg_config.ee_frame_name)
+            self.yolo_data_processer = YoloDataProcessor(config.seg_config, config.device)
+            # 动态赋值config
+            yolo_nc = self.yolo_data_processer.yolo.nc
+            config.seg_config.num_classes = yolo_nc
+            config.seg_config.output_dim = config.dim_model
+             # 初始化模块
+            self.segment_understanding_embedding = SegmentUnderstandingEmbedding(config.seg_config)
 
         self.encoder_latent_input_proj = nn.Linear(config.latent_dim, config.dim_model)
         if self.config.image_features:
@@ -374,6 +390,8 @@ class ACT(nn.Module):
         if self.config.env_state_feature:
             n_1d_tokens += 1
         if self.config.n_history_obs_states > 0:# 历史动作token
+            n_1d_tokens += 1
+        if self.config.use_segment_understanding:# 实例分割理解 token
             n_1d_tokens += 1
         self.encoder_1d_feature_pos_embed = nn.Embedding(n_1d_tokens, config.dim_model)
         if self.config.image_features:
@@ -488,6 +506,14 @@ class ACT(nn.Module):
         if self.config.n_history_obs_states > 0:
             history_obs_state_embed = self.history_obs_state_embedding(batch[HIS_OBS_STATES])  # (B, D)
             encoder_in_tokens.append(history_obs_state_embed)
+        # 新增：调用实例分割理解模块
+        if self.config.use_segment_understanding:
+            cam_key = f"observation.images.{self.config.seg_config.camera_name}"
+            target_imgs = batch[cam_key]
+            yolo_r, yolo_mask = self.yolo_data_processer.get_yolo_data(target_imgs)
+            ee_pose = self.kinematics.forward_kinematics_batch(batch[OBS_STATE])
+            segment_understanding_embed = self.segment_understanding_embedding(yolo_r, yolo_mask , ee_pose) #(B, D)
+            encoder_in_tokens.append(segment_understanding_embed)
 
         if self.config.image_features:
             # For a list of images, the H and W may vary but H*W is constant.

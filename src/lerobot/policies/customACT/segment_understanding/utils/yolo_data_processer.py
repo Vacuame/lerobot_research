@@ -5,35 +5,76 @@ import torch
 from lerobot.policies.customACT.segment_understanding.configuration_segment_understanding import SegmentUnderstandingConfig
 
 class YoloDataProcessor:
-    def __init__(self, config: SegmentUnderstandingConfig):
+    def __init__(self, config: SegmentUnderstandingConfig, device):
         self.config = config
+        self.device = device
+        self.max_objects = config.max_yolo_objects
         self.yolo = YOLO(config.yolo_path)
-        self.ee_anchor = torch.tensor([0.5, 1.0])  # 末端锚点位置
-    
-    def get_data_from_yolo(self, frame):
-        results = self.yolo.track(
-            source=frame,
-            persist=True,   # 跨帧保留 tracker，不会每帧都重置
-            verbose=False,  # 不打印日志
-            conf=0.25,  # 检测置信度低于 0.25 的 bbox 会被丢弃
-            iou=0.7,    # 重叠度大于 x 的 bbox 会被合并
-            tracker=self.config.tracker_path  # 指定用 BoT-SORT
+        self.ee_anchor = torch.tensor([0.5, 1.0],device=device)  # 末端锚点位置
+
+    @torch.no_grad() # 使用YOLO时不计算梯度
+    def get_yolo_data(self, frames):
+        """
+        frames: single image or list of images
+        return:
+            R:      [B, N_max, r_dim]
+            R_mask: [B, N_max]
+        """
+
+        # 反归一化到 [0, 1] 范围，因为act的图片经过了mean-std归一化，不符合YOLO需求
+        frames = self.denormalize_with_imagenet_stats(frames)
+
+        # results = self.yolo.track(
+        #     source=frames,
+        #     persist=True,
+        #     verbose=False,
+        #     conf=0.25,
+        #     iou=0.7,
+        #     tracker=self.config.tracker_path,
+        # )
+
+        results = self.yolo.predict(
+            source=frames,
+            verbose=False,
+            conf=0.25,
+            iou=0.7,
+            device = self.device,
         )
-        return self.data_process(results, self.ee_anchor)
 
+        # results 是一个 list，长度 = batch_size
+        R_list = []
+        mask_list = []
 
-    def data_process(self, results, ee_anchor):
-        boxes = results.boxes
-        xywhn = boxes.xywhn      # [N, 4]
-        obj_xy = xywhn[:, :2]            # [N, 2]
-        cls = boxes.cls          # [N]
-        conf = boxes.conf        # [N]
-        masks = results.masks    # [N, H, W]  (seg模型)
+        for res in results:
+            R_i, mask_i = self.process_single_result(res)
+            R_list.append(R_i)
+            mask_list.append(mask_i)
 
-        delta = obj_xy - ee_anchor          # [N, 2]
-        dist = torch.norm(delta, dim=1)  # [N]
+        R = torch.stack(R_list, dim=0)        # [B, N_max, r_dim]
+        R_mask = torch.stack(mask_list, dim=0)  # [B, N_max]
+        
+        return R, R_mask
 
-        theta = torch.atan2(delta[:,1], delta[:,0])
+    def process_single_result(self, result):
+        device = self.device
+        ee_anchor = self.ee_anchor.to(device)
+
+        if result.boxes is None or len(result.boxes) == 0:
+            R = torch.zeros(self.max_objects, 6, device=device)
+            R_mask = torch.zeros(self.max_objects, dtype=torch.bool, device=device)
+            return R, R_mask
+
+        boxes = result.boxes
+        xywhn = boxes.xywhn            # [N, 4]
+        obj_xy = xywhn[:, :2]          # [N, 2]
+        cls = boxes.cls                # [N]
+        conf = boxes.conf              # [N]
+        masks = result.masks           # [N, H, W] or None
+
+        delta = obj_xy - ee_anchor     # [N, 2]
+        dist = torch.norm(delta, dim=1)
+
+        theta = torch.atan2(delta[:, 1], delta[:, 0])
         sin_theta = torch.sin(theta)
         cos_theta = torch.cos(theta)
 
@@ -42,18 +83,33 @@ class YoloDataProcessor:
             img_area = masks.data.shape[-1] * masks.data.shape[-2]
             mask_area_norm = mask_area / img_area
         else:
-            mask_area_norm = xywhn[:, 2] * xywhn[:, 3]  # 没有的话就用norm方框代替
+            mask_area_norm = xywhn[:, 2] * xywhn[:, 3]
 
-        # cls_emb = class_embedding(cls.long())  # [N, C] # 以后在模型里用吧
+        # [N, 6]
+        R_raw = torch.stack(
+            [
+                cls,
+                sin_theta,
+                cos_theta,
+                dist,
+                conf,
+                mask_area_norm,
+            ],
+            dim=1,
+        )
 
-        tensors = [
-            cls.unsqueeze(1),
-            sin_theta.unsqueeze(1),
-            cos_theta.unsqueeze(1),
-            dist.unsqueeze(1),
-            conf.unsqueeze(1),
-            mask_area_norm.unsqueeze(1),
-        ]
-        R = torch.cat(tensors, dim=1)
-        
-        return R
+        N = min(R_raw.shape[0], self.max_objects)
+
+        R = torch.zeros(self.max_objects, 6, device=device)
+        R_mask = torch.zeros(self.max_objects, dtype=torch.bool, device=device)
+
+        R[:N] = R_raw[:N]
+        R_mask[:N] = True
+
+        return R.to(device), R_mask.to(device)
+
+    def denormalize_with_imagenet_stats(self, normalized_img):
+        mean = torch.tensor([0.485, 0.456, 0.406], device=normalized_img.device).view(-1, 1, 1)
+        std = torch.tensor([0.229, 0.224, 0.225], device=normalized_img.device).view(-1, 1, 1)
+        img = normalized_img * std + mean
+        return torch.clamp(img, 0.0, 1.0)

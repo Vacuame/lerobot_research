@@ -1,5 +1,5 @@
 
-from dataclasses import dataclass
+from dataclasses import dataclass,field
 
 
 #TODO 最好还可以定义 use_fk: bool 之类的选项
@@ -9,6 +9,9 @@ class SegmentUnderstandingConfig:
     # YOLO 模型路径（用于离线加载或参考）
     yolo_path: str = "yolo11l-seg.pt"
     tracker_path: str = "custom/scripts/yolo/botsort.yaml"
+    camera_name: str = "front"
+    max_yolo_objects: int = 20  # YOLO 检测的最大物体数
+    num_classes: int = 4  # YOLO 类别数（动态赋值）
 
     # FK 用的配置
     urdf_path = "custom/config/SO101/so101_new_calib.urdf"
@@ -17,9 +20,6 @@ class SegmentUnderstandingConfig:
     # ==============================
     # R (YOLO detection set) 编码配置
     # ==============================
-    num_classes: int = 4  # COCO 默认类别数，按需调整
-    r_numeric_dim: int = 5  # yolo提取特征后传入的数据维度 [cls, sin_theta, cos_theta, dist, conf, mask_area_norm] - cls = 5
-    
     cls_embed_dim: int = 64      # 类别 embedding 维度
     r_hidden_dim: int = 128      # numeric encoder 中间层 & 输出维度
     r_token_dim: int = 256       # per-object token 投影维度（pooling 前）
@@ -39,4 +39,4 @@ class SegmentUnderstandingConfig:
     # Fusion & Output 配置
     # ==============================
     fusion_hidden_dim: int = 512  # 融合 MLP 的隐藏层维度（可 > dim_model）
-    output_dim: int = 512         # 最终输出维度，应 = dim_model
+    output_dim: int = 512  # 最终输出维度，应 = dim_model

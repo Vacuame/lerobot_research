@@ -11,7 +11,7 @@ class SegmentUnderstandingEmbedding(nn.Module):
         super().__init__()
         self.r_encoder = REncoder(config)
         self.fk_encoder = FKEncoder(config)
-        self.fusion = FusionMLP(config.output_dim)
+        self.fusion = FusionMLP(config)
 
     def forward(self, R, R_mask, FK):
         e_R  = self.r_encoder(R, R_mask)   # [B, dim_model]
@@ -19,7 +19,6 @@ class SegmentUnderstandingEmbedding(nn.Module):
         out  = self.fusion(e_R, e_FK)       # [B, dim_model]
         return out
 
-# 带R_mask版本，先不用
 # 对YOLO检测到的物体集合 R 进行编码
 class REncoder(nn.Module):
     """
@@ -32,9 +31,10 @@ class REncoder(nn.Module):
     def __init__(self, config: SegmentUnderstandingConfig):
         super().__init__()
         self.config = config
+        r_numeric_dim = 5 # 
         self.cls_embed = nn.Embedding(config.num_classes, config.cls_embed_dim)
         self.num_encoder = nn.Sequential(
-            nn.Linear(config.r_numeric_dim, config.r_hidden_dim),
+            nn.Linear(r_numeric_dim, config.r_hidden_dim),
             nn.ReLU(),
             nn.Linear(config.r_hidden_dim, config.r_hidden_dim),
             # 最后一层不加 ReLU，保持负值信息
