@@ -19,8 +19,9 @@ from lerobot.configs.policies import PreTrainedConfig
 from lerobot.configs.types import NormalizationMode
 from lerobot.optim.optimizers import AdamWConfig
 from lerobot.policies.customACT.history_obs_state.configuration_history_obs import HistoryObsConfig, HistoryLSTMConfig, HistoryConv1dConfig
+from lerobot.policies.customACT.segment_understanding.configuration_segment_understanding import SegmentUnderstandingConfig
 
-@PreTrainedConfig.register_subclass("customACT") #这里修改了
+@PreTrainedConfig.register_subclass("customACT")
 @dataclass
 class ACTConfig(PreTrainedConfig):
     """Configuration class for the Action Chunking Transformers policy.
@@ -105,7 +106,11 @@ class ACTConfig(PreTrainedConfig):
     ho_history_segment_num: int = 4
     ho_history_segment_alpha: float = 0.5
     ho_history_segment_decay: str = 'lienar'  # 'exponential' or 'linear' or None
-    
+    # —————————————————————————————————————————————————————————————————————————————————————
+
+    # Segment understanding config
+    use_segment_understanding: bool = True
+    seg_config: SegmentUnderstandingConfig = field(default_factory=SegmentUnderstandingConfig)
 
     # Input / output structure.
     n_obs_steps: int = 1

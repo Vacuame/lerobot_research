@@ -50,6 +50,8 @@ from lerobot.utils.utils import (
     has_method,
     init_logging,
 )
+from lerobot.policies.customACT.modeling_customACT import ACTPolicy as customACT
+from lerobot.policies.customACT.modeling_customACT import ACTConfig as customACTConfig
 
 
 def update_policy(
@@ -206,7 +208,7 @@ def train(cfg: TrainPipelineConfig, accelerator: Accelerator | None = None):
         rename_map=cfg.rename_map,
     )
 
-    #功能 输出模型参数信息
+    #DEBUG 输出模型参数信息
     # for name, param in policy.named_parameters():
     #     print(f"Parameter: {name}, Shape: {param.shape}, Requires Grad: {param.requires_grad}")
 
@@ -326,6 +328,10 @@ def train(cfg: TrainPipelineConfig, accelerator: Accelerator | None = None):
 
     if is_main_process:
         logging.info("Start offline training on a fixed dataset")
+
+    # 如果用到了实例分割模块，将预处理传入customACT
+    if isinstance(policy, customACT) and isinstance(policy.config, customACTConfig) and policy.config.use_segment_understanding:
+        policy.set_preprocessor(preprocessor)
 
     for _ in range(step, cfg.steps):    # 开始循环
         start_time = time.perf_counter()

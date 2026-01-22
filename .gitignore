@@ -173,10 +173,11 @@ outputs/
 
 # Dev folders
 .cache/*
-*.stl
-*.urdf
-*.xml
-*.part
+# 解除了忽略，因为FK要用
+# *.stl
+# *.urdf
+# *.xml
+# *.part
 
 # YOLO datas
 runs/

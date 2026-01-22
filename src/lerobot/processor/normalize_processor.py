@@ -302,6 +302,14 @@ class _NormalizationMixin:
         Raises:
             ValueError: If an unsupported normalization mode is encountered.
         """
+
+        """
+        会处理以下三个参数
+        observation.state FeatureType.STATE
+        observation.images.front FeatureType.VISUAL
+        action FeatureType.ACTION
+        """
+
         norm_mode = self.norm_map.get(feature_type, NormalizationMode.IDENTITY)
         if norm_mode == NormalizationMode.IDENTITY or key not in self._tensor_stats:
             return tensor
@@ -321,7 +329,6 @@ class _NormalizationMixin:
                 self.to(device=tensor.device, dtype=tensor.dtype)
 
         stats = self._tensor_stats[key]
-
         if norm_mode == NormalizationMode.MEAN_STD:
             mean = stats.get("mean", None)
             std = stats.get("std", None)
@@ -333,8 +340,14 @@ class _NormalizationMixin:
             mean, std = stats["mean"], stats["std"]
             # Avoid division by zero by adding a small epsilon.
             denom = std + self.eps
+            #if(key == 'observation.state'):
+            # print(tensor)
+            # print(mean)
+            # print(std)
             if inverse:
                 return tensor * std + mean
+            #if(key == 'observation.state'):
+            # print((tensor - mean) / denom)
             return (tensor - mean) / denom
 
         if norm_mode == NormalizationMode.MIN_MAX:

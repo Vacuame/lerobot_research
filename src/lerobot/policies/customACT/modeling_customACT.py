@@ -41,7 +41,16 @@ from lerobot.utils.constants import ACTION, OBS_ENV_STATE, OBS_IMAGES, OBS_STATE
 from lerobot.policies.customACT.history_obs_state.modeling_history_obs import HistoryObsStateEmbedding
 from lerobot.policies.dino_act.backbone_res import ResNet18Backbone, get_custom_backbone
 from lerobot.policies.dino_act.convnext import ConvNeXtBackbone
-from lerobot.policies.dino_act.convnext_frame import ConvNeXtBackbone1
+from lerobot.policies.dino_act.convnext_frame import ConvNeXtBackbone1from lerobot.policies.customACT.segment_understanding.modeling_segment_understanding import SegmentUnderstandingEmbedding
+from lerobot.policies.customACT.segment_understanding.utils.kinematics import SimpleKinematics
+from lerobot.policies.customACT.segment_understanding.utils.yolo_data_processer import YoloDataProcessor
+# from lerobot.policies.customACT.segment_understanding.utils.denormalize import denormalize_img_with_mean_stats,denormalize_obs_and_angle_to_rad
+# 由于想要未经初始化的数据，需要用到这个
+from lerobot.processor import PolicyProcessorPipeline
+from typing import Any
+from lerobot.processor.normalize_processor import NormalizerProcessorStep
+from lerobot.configs.types import FeatureType
+
 class ACTPolicy(PreTrainedPolicy):
     """
     Action Chunking Transformer Policy as per Learning Fine-Grained Bimanual Manipulation with Low-Cost
@@ -143,7 +152,7 @@ class ACTPolicy(PreTrainedPolicy):
             batch = dict(batch)  # shallow copy so that adding a key doesn't modify the original
             batch[OBS_IMAGES] = [batch[key] for key in self.config.image_features]
 
-        #功能 输出batch的结构
+        #DEBUG 输出batch的结构
         # for key,tensor in batch.items(): # print出batch的内容，方便调试
         #     print(f"{key}: {tensor.shape if isinstance(tensor, Tensor) else type(tensor)}")
 
@@ -169,6 +178,10 @@ class ACTPolicy(PreTrainedPolicy):
 
         return loss, loss_dict
 
+    # 专门给yolo和fk用的预处理器设置函数，它们需要没有经过归一化的数据，然而lerobot传入的batch已经经过归一化了
+    def set_preprocessor(self, preprocessor: PolicyProcessorPipeline[dict[str, Any], dict[str, Any]] | None = None,):
+        self.model.preprocessor = preprocessor
+        
 
 class ACTTemporalEnsembler:
     def __init__(self, temporal_ensemble_coeff: float, chunk_size: int) -> None:
@@ -300,6 +313,8 @@ class ACT(nn.Module):
                                 │    state emb.         │
                                 └───────────────────────┘
     """
+    
+    preprocessor: PolicyProcessorPipeline[dict[str, Any], dict[str, Any]] = None
 
     def __init__(self, config: ACTConfig):
         # BERT style VAE encoder with input tokens [cls, robot_state, *action_sequence].
@@ -401,10 +416,35 @@ class ACT(nn.Module):
             self.encoder_env_state_input_proj = nn.Linear(
                 self.config.env_state_feature.shape[0], config.dim_model
             )
+
         # 新增：历史动作embedding模块
         if self.config.n_history_obs_states > 0:
             self.history_obs_state_embedding = HistoryObsStateEmbedding(config)
         
+
+        # 新增：实例分割理解模块
+        if self.config.use_segment_understanding:
+            # 初始化两个必需的插件：FK & YOLO
+            self.kinematics = SimpleKinematics(config.seg_config.urdf_path, config.seg_config.ee_frame_name)
+            self.yolo_data_processer = YoloDataProcessor(config.seg_config, config.device)
+            # 动态赋值config
+            yolo_nc = self.yolo_data_processer.yolo.nc
+            config.seg_config.num_classes = yolo_nc
+            config.seg_config.output_dim = config.dim_model
+             # 初始化模块
+            self.segment_understanding_embedding = SegmentUnderstandingEmbedding(config.seg_config)
+
+        # 新增：实例分割理解模块
+        if self.config.use_segment_understanding:
+            # 初始化两个必需的插件：FK & YOLO
+            self.kinematics = SimpleKinematics(config.seg_config.urdf_path, config.seg_config.ee_frame_name)
+            self.yolo_data_processer = YoloDataProcessor(config.seg_config, config.device)
+            # 动态赋值config
+            yolo_nc = self.yolo_data_processer.yolo.nc
+            config.seg_config.num_classes = yolo_nc
+            config.seg_config.output_dim = config.dim_model
+             # 初始化模块
+            self.segment_understanding_embedding = SegmentUnderstandingEmbedding(config.seg_config)
 
         self.encoder_latent_input_proj = nn.Linear(config.latent_dim, config.dim_model)
         
@@ -456,6 +496,10 @@ class ACT(nn.Module):
             n_1d_tokens += 1
 
         if self.config.n_history_obs_states > 0:# 历史动作token
+            n_1d_tokens += 1
+        if self.config.use_segment_understanding:# 实例分割理解 token
+            n_1d_tokens += 1
+        if self.config.use_segment_understanding:# 实例分割理解 token
             n_1d_tokens += 1
 
         self.encoder_1d_feature_pos_embed = nn.Embedding(n_1d_tokens, config.dim_model)
@@ -584,6 +628,21 @@ class ACT(nn.Module):
         if self.config.n_history_obs_states > 0:
             history_obs_state_embed = self.history_obs_state_embedding(batch[HIS_OBS_STATES])  # (B, D)
             encoder_in_tokens.append(history_obs_state_embed)
+        # 新增：调用实例分割理解模块
+        if self.config.use_segment_understanding:
+            cam_key = f"observation.images.{self.config.seg_config.camera_name}"
+
+            # 反归一化到 [0, 1] 范围，因为act的数据经过了mean-std归一化，不符合YOLO与FK输入需求
+            norm_step:NormalizerProcessorStep = self.preprocessor.steps[3]
+            imgs_for_yolo = norm_step._apply_transform(batch[cam_key], cam_key, FeatureType.VISUAL, inverse=True)
+            obs_state_rad = norm_step._apply_transform(batch[OBS_STATE], OBS_STATE, FeatureType.STATE, inverse=True) * (torch.pi / 180.0) # 1、反归一化 2、度转弧度
+            
+            # 传入YOLO和FK，并得到分割理解的embedding
+            yolo_r, yolo_mask = self.yolo_data_processer.get_yolo_data(imgs_for_yolo)
+            ee_pose = self.kinematics.forward_kinematics_batch(obs_state_rad)
+            segment_understanding_embed = self.segment_understanding_embedding(yolo_r, yolo_mask , ee_pose) #(B, D)
+            # 最后把embedding放入tokens
+            encoder_in_tokens.append(segment_understanding_embed)
 
         if self.config.image_features:
             # For a list of images, the H and W may vary but H*W is constant.
