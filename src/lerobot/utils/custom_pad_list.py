@@ -1,6 +1,7 @@
 import torch
 
 def pad_list_left_to_length(target_tensor: torch.Tensor, target_length: int) -> torch.Tensor:
+
     current_length = target_tensor.size(0)
     if current_length == target_length:
         return target_tensor

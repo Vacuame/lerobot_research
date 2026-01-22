@@ -187,9 +187,11 @@ def teleoperate(cfg: TeleoperateConfig):
     logging.info(pformat(asdict(cfg)))
     if cfg.display_data:
         init_rerun(session_name="teleoperation")
-
+    # 根据config实例化一个teleoperator和robot
     teleop = make_teleoperator_from_config(cfg.teleop)
     robot = make_robot_from_config(cfg.robot)
+
+
     teleop_action_processor, robot_action_processor, robot_observation_processor = make_default_processors()
 
     teleop.connect()

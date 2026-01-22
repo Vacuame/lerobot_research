@@ -32,14 +32,16 @@ import torchvision
 from torch import Tensor, nn
 from torchvision.models._utils import IntermediateLayerGetter
 from torchvision.ops.misc import FrozenBatchNorm2d
+from lerobot.policies.dino_act.dino_backbone import DinoV2Backbone
 
 from lerobot.policies.customACT.configuration_customACT import ACTConfig
 from lerobot.policies.pretrained import PreTrainedPolicy
 from lerobot.utils.constants import ACTION, OBS_ENV_STATE, OBS_IMAGES, OBS_STATE, HIS_OBS_STATES
-
 #新增：自己的import
 from lerobot.policies.customACT.history_obs_state.modeling_history_obs import HistoryObsStateEmbedding
-
+from lerobot.policies.dino_act.backbone_res import ResNet18Backbone, get_custom_backbone
+from lerobot.policies.dino_act.convnext import ConvNeXtBackbone
+from lerobot.policies.dino_act.convnext_frame import ConvNeXtBackbone1
 class ACTPolicy(PreTrainedPolicy):
     """
     Action Chunking Transformer Policy as per Learning Fine-Grained Bimanual Manipulation with Low-Cost
@@ -99,6 +101,7 @@ class ACTPolicy(PreTrainedPolicy):
 
     @torch.no_grad()
     def select_action(self, batch: dict[str, Tensor]) -> Tensor:
+        
         """Select a single action given environment observations.
 
         This method wraps `select_actions` in order to return one action at a time for execution in the
@@ -304,7 +307,7 @@ class ACT(nn.Module):
         super().__init__()
         self.config = config
 
-        print('─=≡Σ((ﾉ≧∀≦)ﾉ') # customACT标记
+        print('------customACT------') # customACT标记
 
         if self.config.use_vae:
             self.vae_encoder = ACTEncoder(config, is_vae_encoder=True)
@@ -331,17 +334,58 @@ class ACT(nn.Module):
                 create_sinusoidal_pos_embedding(num_input_token_encoder, config.dim_model).unsqueeze(0),
             )
 
+
+
+
+
+
+
+
+
+
+
+
         # Backbone for image feature extraction.
+        #修改为DinoV2Backbone
         if self.config.image_features:
-            backbone_model = getattr(torchvision.models, config.vision_backbone)(
-                replace_stride_with_dilation=[False, False, config.replace_final_stride_with_dilation],
-                weights=config.pretrained_backbone_weights,
-                norm_layer=FrozenBatchNorm2d,
-            )
-            # Note: The assumption here is that we are using a ResNet model (and hence layer4 is the final
-            # feature map).
-            # Note: The forward method of this returns a dict: {"feature_map": output}.
-            self.backbone = IntermediateLayerGetter(backbone_model, return_layers={"layer4": "feature_map"})
+            if self.config.vision_backbone == "dino":
+                self.backbone = DinoV2Backbone()
+            elif self.config.vision_backbone == "convnext":
+                self.backbone = ConvNeXtBackbone()
+            else:
+                backbone_model = getattr(torchvision.models, config.vision_backbone)(
+                    replace_stride_with_dilation=[False, False, config.replace_final_stride_with_dilation],
+                    weights=config.pretrained_backbone_weights,
+                    norm_layer=FrozenBatchNorm2d,
+                )
+                # Note: The assumption here is that we are using a ResNet model (and hence layer4 is the final
+                # feature map).
+                # Note: The forward method of this returns a dict: {"feature_map": output}.
+                self.backbone = IntermediateLayerGetter(backbone_model, return_layers={"layer4": "feature_map"})
+
+        # class Config:
+        #     vision_backbone = 'resnet18'
+        #     replace_final_stride_with_dilation = False # 例如设为 True
+        #     pretrained_backbone_weights = True # 加载权重
+        # config1 = Config()
+
+        
+        # if self.config.image_features:
+        #     if self.config.vision_backbone == "dino":
+        #         self.backbone = DinoV2Backbone()
+        #     elif self.config.vision_backbone == "resnet18":
+        #         self.backbone = get_custom_backbone(config1)
+        
+
+
+
+
+
+
+
+
+
+
 
         # Transformer (acts as VAE decoder when training with the variational objective).
         self.encoder = ACTEncoder(config)
@@ -360,21 +404,60 @@ class ACT(nn.Module):
         # 新增：历史动作embedding模块
         if self.config.n_history_obs_states > 0:
             self.history_obs_state_embedding = HistoryObsStateEmbedding(config)
+        
 
         self.encoder_latent_input_proj = nn.Linear(config.latent_dim, config.dim_model)
-        if self.config.image_features:
-            self.encoder_img_feat_input_proj = nn.Conv2d(
-                backbone_model.fc.in_features, config.dim_model, kernel_size=1
-            )
         
+        # if self.config.image_features:
+        #     if config.vision_backbone == "dino":
+        #         self.encoder_img_feat_input_proj = nn.Conv2d(
+        #             768, config.dim_model, kernel_size=1
+        #         )
+        #     else:
+        #         self.encoder_img_feat_input_proj = nn.Conv2d(
+        #             backbone_model.fc.in_features, config.dim_model, kernel_size=1
+        #         )
+
+
+
+
+
+
+        # backbone
+        
+        if self.config.image_features:
+            if config.vision_backbone == "dino":
+                self.encoder_img_feat_input_proj = nn.Conv2d(
+                    512, config.dim_model, kernel_size=1
+                )
+            elif config.vision_backbone == "convnext":
+                self.encoder_img_feat_input_proj = nn.Conv2d(
+                    512, config.dim_model, kernel_size=1
+                )
+            else:
+                self.encoder_img_feat_input_proj = nn.Conv2d(
+                    backbone_model.fc.in_features, config.dim_model, kernel_size=1
+                )
+        
+
+
+
+
+
+
+
+
         # Transformer encoder positional embeddings.
         n_1d_tokens = 1  # for the latent
         if self.config.robot_state_feature:
             n_1d_tokens += 1
+
         if self.config.env_state_feature:
             n_1d_tokens += 1
+
         if self.config.n_history_obs_states > 0:# 历史动作token
             n_1d_tokens += 1
+
         self.encoder_1d_feature_pos_embed = nn.Embedding(n_1d_tokens, config.dim_model)
         if self.config.image_features:
             self.encoder_cam_feat_pos_embed = ACTSinusoidalPositionEmbedding2d(config.dim_model // 2)
@@ -388,14 +471,24 @@ class ACT(nn.Module):
 
         self._reset_parameters()
 
+
+        # 打印模型结构
+        print("\n========== ACT MODEL STRUCT ==========")
+        print(self.backbone)
+        print("=====================================\n")
+
+
+
+
+        
+
     def _reset_parameters(self):
         """Xavier-uniform initialization of the transformer parameters as in the original code."""
         for p in chain(self.encoder.parameters(), self.decoder.parameters()):
             if p.dim() > 1:
                 nn.init.xavier_uniform_(p)
 
-    # 实际执行动作预测的位置
-    def forward(self, batch: dict[str, Tensor]) -> tuple[Tensor, tuple[Tensor, Tensor] | tuple[None, None]]:
+                
         """A forward pass through the Action Chunking Transformer (with optional VAE encoder).
 
         `batch` should have the following structure:
@@ -414,11 +507,13 @@ class ACT(nn.Module):
             Tuple containing the latent PDF's parameters (mean, log(σ²)) both as (B, L) tensors where L is the
             latent dimension.
         """
+    # 实际执行动作预测的位置
+    def forward(self, batch: dict[str, Tensor]) -> tuple[Tensor, tuple[Tensor, Tensor] | tuple[None, None]]:
+
         if self.config.use_vae and self.training:
             assert ACTION in batch, (
                 "actions must be provided when using the variational objective in training mode."
             )
-
         batch_size = batch[OBS_IMAGES][0].shape[0] if OBS_IMAGES in batch else batch[OBS_ENV_STATE].shape[0]
 
         # Prepare the latent for input to the transformer encoder.
@@ -426,7 +521,7 @@ class ACT(nn.Module):
             # Prepare the input to the VAE encoder: [cls, *joint_space_configuration, *action_sequence].
             cls_embed = einops.repeat(
                 self.vae_encoder_cls_embed.weight, "1 d -> b 1 d", b=batch_size
-            )  # (B, 1, D)
+            )  # (B, 1, D),为每个样本复制一个 class token embedding，作为序列的第 0 个 token。
             if self.config.robot_state_feature:
                 robot_state_embed = self.vae_encoder_robot_state_input_proj(batch[OBS_STATE])
                 robot_state_embed = robot_state_embed.unsqueeze(1)  # (B, 1, D)
@@ -464,7 +559,6 @@ class ACT(nn.Module):
             mu = latent_pdf_params[:, : self.config.latent_dim]
             # This is 2log(sigma). Done this way to match the original implementation.
             log_sigma_x2 = latent_pdf_params[:, self.config.latent_dim :]
-
             # Sample the latent with the reparameterization trick.
             latent_sample = mu + log_sigma_x2.div(2).exp() * torch.randn_like(mu)
         else:
@@ -484,6 +578,8 @@ class ACT(nn.Module):
         # Environment state token.
         if self.config.env_state_feature:
             encoder_in_tokens.append(self.encoder_env_state_input_proj(batch[OBS_ENV_STATE]))
+
+
         # 新增：调用历史观测状态
         if self.config.n_history_obs_states > 0:
             history_obs_state_embed = self.history_obs_state_embedding(batch[HIS_OBS_STATES])  # (B, D)
@@ -493,6 +589,7 @@ class ACT(nn.Module):
             # For a list of images, the H and W may vary but H*W is constant.
             # NOTE: If modifying this section, verify on MPS devices that
             # gradients remain stable (no explosions or NaNs).
+            # print(list(batch.keys()))
             for img in batch[OBS_IMAGES]:
                 cam_features = self.backbone(img)["feature_map"]
                 cam_pos_embed = self.encoder_cam_feat_pos_embed(cam_features).to(dtype=cam_features.dtype)
@@ -768,6 +865,3 @@ def get_activation_fn(activation: str) -> Callable:
     if activation == "glu":
         return F.glu
     raise RuntimeError(f"activation should be relu/gelu/glu, not {activation}.")
-
-
-

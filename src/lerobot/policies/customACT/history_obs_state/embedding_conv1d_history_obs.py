@@ -34,7 +34,7 @@ class WeightedSegmentPooling(nn.Module):
         self.alpha = alpha # 控制非均匀分段的参数
         self.decay = decay # 'exponential' 或 'linear' 或 None
 
-    def _make_boundaries(self, T):
+    def _make_boundaries(self, T):#T是动作帧数
         diff = self.alpha
         num_segments = self.num_segments
         if not (0 <= diff <= 1):
@@ -48,23 +48,23 @@ class WeightedSegmentPooling(nn.Module):
             ratio = (i / num_segments) ** (1.0 / (power + 1e-9))
             pos = int(round(ratio * T))
             cuts.append(max(pos, cuts[-1] + 1))  # 至少比前一个大1
-        cuts.append(T) # [0,1,8,32]
-        cuts = cuts[::-1] # [32,8,1,0]
+        cuts.append(T) # [0,1,8,18,32]
+        cuts = cuts[::-1] # [32,18,8,1,0]
 
-        return [(T-cuts[i], T-cuts[i+1]) for i in range(num_segments)]
+        return [(T-cuts[i], T-cuts[i+1]) for i in range(num_segments)] #T为32时得到分段[(0,14),(14,24),(24,31),(31,32)]
 
     def forward(self, x):
         B, C, T = x.shape # [B, C, T]
         boundaries = self._make_boundaries(T)
 
-        segment_feats = []
+        segment_feats = []#用来存每一个 segment 的 [B, C] 特征
         prev = 0
         # 先每段单独池化再加权，相当于每步的权重是w/L，否则段落的长度会影响每段的权值
         for boundary in boundaries:
-                seg = x[:, :, boundary[0]:boundary[1]]  # [B, C, L] 取时间轴的其中一段
+                seg = x[:, :, boundary[0]:boundary[1]]  # [B, C, L] 取时间轴的其中一段，第一段是[B, C, 14],第二段是[B, C, 10]，第三段是[B, C, 7]，第四段是[B, C, 1]
                 seg_mean = seg.mean(dim=-1)  # [B, C] 先对段做简单平均池化（得到每段的平均值）
-                segment_feats.append(seg_mean)
-        seg_feats = torch.stack(segment_feats, dim=-1)  # [B, C, num_segments]
+                segment_feats.append(seg_mean)#一共四段，每段的shape都是[B, C]，存到list里
+        seg_feats = torch.stack(segment_feats, dim=-1)  # 将四段拼接成[B, C, num_segments]
 
         # 段间权值
         if self.decay == 'exponential': # 指数递增 比如[0.14, 0.37, 1.0]
@@ -76,7 +76,12 @@ class WeightedSegmentPooling(nn.Module):
         weights = weights / weights.sum() # 归一化，保证加权后结果仍是加权平均（而不是加权求和）
 
         out = torch.sum(seg_feats * weights[None, None, :], dim=-1)  # [B, C]（其中 weights[None, None, :]是扩展维度，使其到 [B, C, num_segments]）
-        return out
+        return out #得到加权后的这一段的特征 [B, C]
+    
+
+
+
+    
 
 class HistoryConv1dEmbedding(nn.Module): # 卷积特征
     def __init__(self, config: ACTConfig, modeling_config: HistoryConv1dConfig):

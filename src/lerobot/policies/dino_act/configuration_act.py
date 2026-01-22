@@ -18,9 +18,9 @@ from dataclasses import dataclass, field
 from lerobot.configs.policies import PreTrainedConfig
 from lerobot.configs.types import NormalizationMode
 from lerobot.optim.optimizers import AdamWConfig
-from lerobot.policies.customACT.history_obs_state.configuration_history_obs import HistoryObsConfig, HistoryLSTMConfig, HistoryConv1dConfig
 
-@PreTrainedConfig.register_subclass("customACT") #这里修改了
+
+@PreTrainedConfig.register_subclass("act")
 @dataclass
 class ACTConfig(PreTrainedConfig):
     """Configuration class for the Action Chunking Transformers policy.
@@ -90,23 +90,6 @@ class ACTConfig(PreTrainedConfig):
             is enabled. Loss is then calculated as: `reconstruction_loss + kl_weight * kld_loss`.
     """
 
-    # 新增：自定义参数
-    n_history_obs_states:int = 0 # 若 = 0 则关闭此功能
-    
-    # 临时config: history_obs -- ho_
-    ho_type:str = 'conv1d'  # 'lstm' or 'conv1d'
-    # his_obs_config: HistoryObsConfig | None = None
-
-    # lstm params
-    ho_input_size: int = 6
-    ho_hidden_size: int = 64
-    ho_num_layers: int = 1
-    # conv1d params
-    ho_history_segment_num: int = 4
-    ho_history_segment_alpha: float = 0.5
-    ho_history_segment_decay: str = 'lienar'  # 'exponential' or 'linear' or None
-    
-
     # Input / output structure.
     n_obs_steps: int = 1
     chunk_size: int = 100
@@ -122,10 +105,7 @@ class ACTConfig(PreTrainedConfig):
 
     # Architecture.
     # Vision backbone.
-    #  "dino", "resnet18", "convnext"
-    # vision_backbone: str = "resnet18"
-    vision_backbone: str = "convnext"  
-    # vision_backbone: str = "dino"
+    vision_backbone: str = "resnet18"
     pretrained_backbone_weights: str | None = "ResNet18_Weights.IMAGENET1K_V1"
     replace_final_stride_with_dilation: int = False
     # Transformer layers.
@@ -161,10 +141,10 @@ class ACTConfig(PreTrainedConfig):
         super().__post_init__()
 
         """Input validation (not exhaustive)."""
-        # if not self.vision_backbone.startswith("resnet"):
-        #     raise ValueError(
-        #         f"`vision_backbone` must be one of the ResNet variants. Got {self.vision_backbone}."
-        #     )
+        if not self.vision_backbone.startswith("resnet"):
+            raise ValueError(
+                f"`vision_backbone` must be one of the ResNet variants. Got {self.vision_backbone}."
+            )
         if self.temporal_ensemble_coeff is not None and self.n_action_steps > 1:
             raise NotImplementedError(
                 "`n_action_steps` must be 1 when using temporal ensembling. This is "
@@ -193,36 +173,14 @@ class ACTConfig(PreTrainedConfig):
         if not self.image_features and not self.env_state_feature:
             raise ValueError("You must provide at least one image or the environment state among the inputs.")
 
-    def get_HistoryObsConfig(self) -> HistoryObsConfig:
-        if self.ho_type == 'lstm':
-            return HistoryLSTMConfig(
-                input_size=self.ho_input_size,
-                hidden_size=self.ho_hidden_size,
-                num_layers=self.ho_num_layers
-            )
-        elif self.ho_type == 'conv1d':
-            return HistoryConv1dConfig(
-                history_segment_num=self.ho_history_segment_num,
-                history_segment_alpha=self.ho_history_segment_alpha,
-                history_segment_decay=self.ho_history_segment_decay
-            )
-        else:
-            raise ValueError(f"Unknown ho_type: {self.ho_type}")
-
     @property
     def observation_delta_indices(self) -> None:
         return None
 
     @property
     def action_delta_indices(self) -> list:
-        return list(range(self.chunk_size)) # 0,1,2,3,4,5,6...chunk_size-1
-
-    @property
-    def history_obs_state_delta_indices(self) -> list: # -steps+1...-2,-1,0  [-steps+1, 1)
-        return list(range(-self.n_history_obs_states+1, 1)) if( self.n_history_obs_states > 0 ) else None 
+        return list(range(self.chunk_size))
 
     @property
     def reward_delta_indices(self) -> None:
         return None
-
-
