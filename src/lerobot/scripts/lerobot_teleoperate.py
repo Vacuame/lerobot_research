@@ -164,7 +164,7 @@ def teleop_loop(
         # ee_frame_name = "gripper_frame_link"
         # joint_names = list(robot.bus.motors.keys())
         # kin = SimpleKinematics(urdf_path, ee_frame_name)
-        # ee_pose = kin.forward_kinematics(robot_action_to_send, joint_names)
+        # ee_pose = kin.forward_kinematics_telop(robot_action_to_send, joint_names)
         # result = ee_pose
         # clear_lines(8)
         # print(result)

@@ -20,10 +20,6 @@ class YoloDataProcessor:
             R:      [B, N_max, r_dim]
             R_mask: [B, N_max]
         """
-
-        # 反归一化到 [0, 1] 范围，因为act的图片经过了mean-std归一化，不符合YOLO需求
-        frames = self.denormalize_with_imagenet_stats(frames)
-
         # results = self.yolo.track(
         #     source=frames,
         #     persist=True,
@@ -32,7 +28,8 @@ class YoloDataProcessor:
         #     iou=0.7,
         #     tracker=self.config.tracker_path,
         # )
-
+        
+        # results 是一个 list，长度 = batch_size
         results = self.yolo.predict(
             source=frames,
             verbose=False,
@@ -41,7 +38,16 @@ class YoloDataProcessor:
             device = self.device,
         )
 
-        # results 是一个 list，长度 = batch_size
+        #DEBUG 打印结果
+        # for r in results:
+        #     if r.boxes is not None:
+        #         for box in r.boxes:
+        #             xyxy = box.xyxy[0].cpu().numpy()
+        #             conf = box.conf.item()
+        #             cls_id = int(box.cls.item())
+        #             cls_name = r.names[cls_id]
+        #             print(f"{cls_name}   at {xyxy}     conf={conf:.2f}")
+
         R_list = []
         mask_list = []
 
@@ -108,8 +114,4 @@ class YoloDataProcessor:
 
         return R.to(device), R_mask.to(device)
 
-    def denormalize_with_imagenet_stats(self, normalized_img):
-        mean = torch.tensor([0.485, 0.456, 0.406], device=normalized_img.device).view(-1, 1, 1)
-        std = torch.tensor([0.229, 0.224, 0.225], device=normalized_img.device).view(-1, 1, 1)
-        img = normalized_img * std + mean
-        return torch.clamp(img, 0.0, 1.0)
+    

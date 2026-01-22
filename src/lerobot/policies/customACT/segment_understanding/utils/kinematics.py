@@ -49,7 +49,7 @@ class SimpleKinematics:
             # 1. FK（joint）
             pin.forwardKinematics(self.robot_model, self.data, q)
 
-            # 2. frame placement（一次性更新）
+            # 2. frame placement
             pin.updateFramePlacements(self.robot_model, self.data)
 
             # 3. 取 EE

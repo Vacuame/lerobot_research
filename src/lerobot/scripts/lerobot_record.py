@@ -133,6 +133,9 @@ from lerobot.utils.utils import (
     log_say,
 )
 from lerobot.utils.visualization_utils import init_rerun, log_rerun_data
+from lerobot.policies.customACT.modeling_customACT import ACTPolicy as customACT
+from lerobot.policies.customACT.modeling_customACT import ACTConfig as customACTConfig
+
 
 
 @dataclass
@@ -463,9 +466,13 @@ def record(cfg: RecordConfig) -> LeRobotDataset: # 实际开始录制
         )
 
     #新增：特判customACT，创建滑动队列 
-    if(policy is not None and isinstance(cfg.policy, CustomACTConfig) and cfg.policy.n_history_obs_states > 0):
+    if policy is not None and isinstance(cfg.policy, CustomACTConfig) and cfg.policy.n_history_obs_states > 0:
         global obs_window
         obs_window = deque(maxlen=cfg.policy.n_history_obs_states)
+    
+    #新增：如果用到了实例分割模块，将预处理传入customACT
+    if policy is not None and isinstance(policy, customACT) and isinstance(policy.config, customACTConfig) and policy.config.use_segment_understanding:
+        policy.set_preprocessor(preprocessor)
 
     robot.connect()
     if teleop is not None:

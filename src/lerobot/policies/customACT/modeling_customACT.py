@@ -42,6 +42,12 @@ from lerobot.policies.customACT.history_obs_state.modeling_history_obs import Hi
 from lerobot.policies.customACT.segment_understanding.modeling_segment_understanding import SegmentUnderstandingEmbedding
 from lerobot.policies.customACT.segment_understanding.utils.kinematics import SimpleKinematics
 from lerobot.policies.customACT.segment_understanding.utils.yolo_data_processer import YoloDataProcessor
+# from lerobot.policies.customACT.segment_understanding.utils.denormalize import denormalize_img_with_mean_stats,denormalize_obs_and_angle_to_rad
+# 由于想要未经初始化的数据，需要用到这个
+from lerobot.processor import PolicyProcessorPipeline
+from typing import Any
+from lerobot.processor.normalize_processor import NormalizerProcessorStep
+from lerobot.configs.types import FeatureType
 
 class ACTPolicy(PreTrainedPolicy):
     """
@@ -169,6 +175,10 @@ class ACTPolicy(PreTrainedPolicy):
 
         return loss, loss_dict
 
+    # 专门给yolo和fk用的预处理器设置函数，它们需要没有经过归一化的数据，然而lerobot传入的batch已经经过归一化了
+    def set_preprocessor(self, preprocessor: PolicyProcessorPipeline[dict[str, Any], dict[str, Any]] | None = None,):
+        self.model.preprocessor = preprocessor
+        
 
 class ACTTemporalEnsembler:
     def __init__(self, temporal_ensemble_coeff: float, chunk_size: int) -> None:
@@ -300,6 +310,8 @@ class ACT(nn.Module):
                                 │    state emb.         │
                                 └───────────────────────┘
     """
+    
+    preprocessor: PolicyProcessorPipeline[dict[str, Any], dict[str, Any]] = None
 
     def __init__(self, config: ACTConfig):
         # BERT style VAE encoder with input tokens [cls, robot_state, *action_sequence].
@@ -509,10 +521,17 @@ class ACT(nn.Module):
         # 新增：调用实例分割理解模块
         if self.config.use_segment_understanding:
             cam_key = f"observation.images.{self.config.seg_config.camera_name}"
-            target_imgs = batch[cam_key]
-            yolo_r, yolo_mask = self.yolo_data_processer.get_yolo_data(target_imgs)
-            ee_pose = self.kinematics.forward_kinematics_batch(batch[OBS_STATE])
+
+            # 反归一化到 [0, 1] 范围，因为act的数据经过了mean-std归一化，不符合YOLO与FK输入需求
+            norm_step:NormalizerProcessorStep = self.preprocessor.steps[3]
+            imgs_for_yolo = norm_step._apply_transform(batch[cam_key], cam_key, FeatureType.VISUAL, inverse=True)
+            obs_state_rad = norm_step._apply_transform(batch[OBS_STATE], OBS_STATE, FeatureType.STATE, inverse=True) * (torch.pi / 180.0) # 1、反归一化 2、度转弧度
+            
+            # 传入YOLO和FK，并得到分割理解的embedding
+            yolo_r, yolo_mask = self.yolo_data_processer.get_yolo_data(imgs_for_yolo)
+            ee_pose = self.kinematics.forward_kinematics_batch(obs_state_rad)
             segment_understanding_embed = self.segment_understanding_embedding(yolo_r, yolo_mask , ee_pose) #(B, D)
+            # 最后把embedding放入tokens
             encoder_in_tokens.append(segment_understanding_embed)
 
         if self.config.image_features:
