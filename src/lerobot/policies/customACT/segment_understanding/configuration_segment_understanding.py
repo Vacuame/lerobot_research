@@ -7,9 +7,9 @@ from dataclasses import dataclass,field
 @dataclass
 class SegmentUnderstandingConfig:
     # YOLO 模型路径（用于离线加载或参考）
-    yolo_path: str = "yolo11l-seg.pt"
+    yolo_path: str = "runs/segment/grab_block/weights/best.pt"
     tracker_path: str = "custom/scripts/yolo/botsort.yaml"
-    camera_name: str = "front"
+    camera_name: str = "robot1"
     max_yolo_objects: int = 20  # YOLO 检测的最大物体数
     num_classes: int = 4  # YOLO 类别数（动态赋值）
 

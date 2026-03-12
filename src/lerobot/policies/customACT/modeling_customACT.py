@@ -41,7 +41,8 @@ from lerobot.utils.constants import ACTION, OBS_ENV_STATE, OBS_IMAGES, OBS_STATE
 from lerobot.policies.customACT.history_obs_state.modeling_history_obs import HistoryObsStateEmbedding
 from lerobot.policies.dino_act.backbone_res import ResNet18Backbone, get_custom_backbone
 from lerobot.policies.dino_act.convnext import ConvNeXtBackbone
-from lerobot.policies.dino_act.convnext_frame import ConvNeXtBackbone1from lerobot.policies.customACT.segment_understanding.modeling_segment_understanding import SegmentUnderstandingEmbedding
+from lerobot.policies.dino_act.convnext_frame import ConvNeXtBackbone1
+from lerobot.policies.customACT.segment_understanding.modeling_segment_understanding import SegmentUnderstandingEmbedding
 from lerobot.policies.customACT.segment_understanding.utils.kinematics import SimpleKinematics
 from lerobot.policies.customACT.segment_understanding.utils.yolo_data_processer import YoloDataProcessor
 # from lerobot.policies.customACT.segment_understanding.utils.denormalize import denormalize_img_with_mean_stats,denormalize_obs_and_angle_to_rad
@@ -378,18 +379,19 @@ class ACT(nn.Module):
                 # Note: The forward method of this returns a dict: {"feature_map": output}.
                 self.backbone = IntermediateLayerGetter(backbone_model, return_layers={"layer4": "feature_map"})
 
-        # class Config:
-        #     vision_backbone = 'resnet18'
-        #     replace_final_stride_with_dilation = False # 例如设为 True
-        #     pretrained_backbone_weights = True # 加载权重
-        # config1 = Config()
-
-        
-        # if self.config.image_features:
-        #     if self.config.vision_backbone == "dino":
-        #         self.backbone = DinoV2Backbone()
-        #     elif self.config.vision_backbone == "resnet18":
-        #         self.backbone = get_custom_backbone(config1)
+        if self.config.image_features:
+            if config.vision_backbone == "dino":
+                self.encoder_img_feat_input_proj = nn.Conv2d(
+                    512, config.dim_model, kernel_size=1
+                )
+            elif config.vision_backbone == "convnext":
+                self.encoder_img_feat_input_proj = nn.Conv2d(
+                    512, config.dim_model, kernel_size=1
+                )
+            else:
+                self.encoder_img_feat_input_proj = nn.Conv2d(
+                    backbone_model.fc.in_features, config.dim_model, kernel_size=1
+                )
         
 
 
@@ -422,17 +424,11 @@ class ACT(nn.Module):
             self.history_obs_state_embedding = HistoryObsStateEmbedding(config)
         
 
-        # 新增：实例分割理解模块
-        if self.config.use_segment_understanding:
-            # 初始化两个必需的插件：FK & YOLO
-            self.kinematics = SimpleKinematics(config.seg_config.urdf_path, config.seg_config.ee_frame_name)
-            self.yolo_data_processer = YoloDataProcessor(config.seg_config, config.device)
-            # 动态赋值config
-            yolo_nc = self.yolo_data_processer.yolo.nc
-            config.seg_config.num_classes = yolo_nc
-            config.seg_config.output_dim = config.dim_model
-             # 初始化模块
-            self.segment_understanding_embedding = SegmentUnderstandingEmbedding(config.seg_config)
+
+
+
+
+
 
         # 新增：实例分割理解模块
         if self.config.use_segment_understanding:
@@ -445,39 +441,21 @@ class ACT(nn.Module):
             config.seg_config.output_dim = config.dim_model
              # 初始化模块
             self.segment_understanding_embedding = SegmentUnderstandingEmbedding(config.seg_config)
+
+
+
+
+
 
         self.encoder_latent_input_proj = nn.Linear(config.latent_dim, config.dim_model)
         
-        # if self.config.image_features:
-        #     if config.vision_backbone == "dino":
-        #         self.encoder_img_feat_input_proj = nn.Conv2d(
-        #             768, config.dim_model, kernel_size=1
-        #         )
-        #     else:
-        #         self.encoder_img_feat_input_proj = nn.Conv2d(
-        #             backbone_model.fc.in_features, config.dim_model, kernel_size=1
-        #         )
-
-
 
 
 
 
         # backbone
         
-        if self.config.image_features:
-            if config.vision_backbone == "dino":
-                self.encoder_img_feat_input_proj = nn.Conv2d(
-                    512, config.dim_model, kernel_size=1
-                )
-            elif config.vision_backbone == "convnext":
-                self.encoder_img_feat_input_proj = nn.Conv2d(
-                    512, config.dim_model, kernel_size=1
-                )
-            else:
-                self.encoder_img_feat_input_proj = nn.Conv2d(
-                    backbone_model.fc.in_features, config.dim_model, kernel_size=1
-                )
+
         
 
 
@@ -496,11 +474,11 @@ class ACT(nn.Module):
             n_1d_tokens += 1
 
         if self.config.n_history_obs_states > 0:# 历史动作token
-            n_1d_tokens += 1
+            n_1d_tokens += 4
+
         if self.config.use_segment_understanding:# 实例分割理解 token
             n_1d_tokens += 1
-        if self.config.use_segment_understanding:# 实例分割理解 token
-            n_1d_tokens += 1
+
 
         self.encoder_1d_feature_pos_embed = nn.Embedding(n_1d_tokens, config.dim_model)
         if self.config.image_features:
@@ -627,7 +605,15 @@ class ACT(nn.Module):
         # 新增：调用历史观测状态
         if self.config.n_history_obs_states > 0:
             history_obs_state_embed = self.history_obs_state_embedding(batch[HIS_OBS_STATES])  # (B, D)
-            encoder_in_tokens.append(history_obs_state_embed)
+            # print(f"history_obs_state_embed: {history_obs_state_embed.shape}") # debug 输出历史观测状态embedding的形状
+            # print(f"encoder_in_tokens length before adding history_obs_state_embed: {len(encoder_in_tokens)}") # debug 输出添加历史观测状态embedding前encoder_in_tokens的长度:2
+            history_obs_state_embed = history_obs_state_embed.permute(1, 0, 2)  # (N, B, D)
+            encoder_in_tokens.extend(list(history_obs_state_embed))
+            # print(f"encoder_in_tokens length after adding history_obs_state_embed: {len(encoder_in_tokens)}") # debug 输出添加历史观测状态embedding后encoder_in_tokens的长度:6
+
+
+
+
         # 新增：调用实例分割理解模块
         if self.config.use_segment_understanding:
             cam_key = f"observation.images.{self.config.seg_config.camera_name}"

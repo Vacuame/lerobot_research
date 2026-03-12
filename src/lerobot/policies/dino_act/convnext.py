@@ -2,35 +2,24 @@ import torchvision.models as models
 import torch.nn as nn
 import torch
 class ConvNeXtBackbone(nn.Module):
-    def __init__(self, target_dim=512, use_stages=3):
+    def __init__(self, target_dim=512):
         super().__init__()
         # 使用 convnext_tiny (性能优于 ResNet50，速度接近)
         # weights='DEFAULT' 会加载 ImageNet-1K 上的最新权重
-        model = models.convnext_tiny(weights='DEFAULT')
+        self.backbone = models.convnext_tiny(weights='DEFAULT')
         
         # 获取 ConvNeXt 的输出通道数 (Tiny版本通常是 768)
-        self.in_features = model.classifier[2].in_features
+        self.in_features = self.backbone.classifier[2].in_features
         
         # 移除原本的分类头 (LayerNorm + Flatten + Linear)
         # ConvNeXt 的特征提取部分都在 .features 里
-        features = model.features
-        
-        if use_stages == 3:
-            # Stem + Stage1 + Down1 + Stage2 + Down2 + Stage3
-            self.backbone = nn.Sequential(*features[:6])
-            self.in_features = 384
-            print("Using ConvNeXt up to Stage 3, output channels:", self.in_features)
-        elif use_stages == 4:
-            self.backbone = features
-            self.in_features = 768
-        else:
-            raise ValueError("use_stages must be 3 or 4")
+        self.backbone = self.backbone.features
         
         # 如果需要投影到 512 (适配 ACT)
         self.projection = None
         if target_dim and target_dim != self.in_features:
             # 使用 1x1 卷积来降维，保持特征图结构
-            self.projection = nn.Conv2d(self.in_features, target_dim, kernel_size=3,stride=2,padding=1)
+            self.projection = nn.Conv2d(self.in_features, target_dim, kernel_size=1)
             # self.projection = CoordAwareProjection(self.in_features, target_dim) # 使用带坐标信息的投影
 
     def forward(self, x):

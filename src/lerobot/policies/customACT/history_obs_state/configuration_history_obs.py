@@ -16,10 +16,11 @@ class HistoryLSTMConfig(HistoryObsConfig):
     
 @dataclass
 class HistoryConv1dConfig(HistoryObsConfig):
+    #这里的参数都是默认值，可以在config_customACT里改
     type: str = "conv1d"
-    history_segment_num: int = 3
+    history_segment_num: int = 3 
     history_segment_alpha: float = 0.5
-    history_segment_decay: str = 'lienar'  # 'exponential' or 'linear' or None
+    history_segment_decay: str = 'linear'  # 'exponential' or 'linear' or None
     
 
 

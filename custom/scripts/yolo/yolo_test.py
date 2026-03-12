@@ -83,7 +83,7 @@ def yolo_seg_picture(
 
 def yolo_seg_camera(
     model_path,
-    cam_id=1
+    cam_id=2
 ):
     model = YOLO(model_path)
 
@@ -191,7 +191,7 @@ if __name__ == "__main__":
     yolo_seg_camera("runs/segment/grab_block/weights/best.pt")
 
     # yolo_seg_picture(model_path="runs/segment/train4/weights/best.pt",picture_path="custom/scripts/yolo/image/test1.jpg")
-    yolo_seg_picture(model_path="yolo11l-seg.pt",picture_path="custom/scripts/yolo/image/sheep.jpg")
+    # yolo_seg_picture(model_path="yolo11l-seg.pt",picture_path="custom/scripts/yolo/image/sheep.jpg")
 
 
     #print_label_names()

@@ -92,7 +92,7 @@ class ACTConfig(PreTrainedConfig):
     """
 
     # 新增：自定义参数
-    n_history_obs_states:int = 0 # 若 = 0 则关闭此功能
+    n_history_obs_states:int = 0 # 若 = 0 则关闭此功能，填多少帧
     
     # 临时config: history_obs -- ho_
     ho_type:str = 'conv1d'  # 'lstm' or 'conv1d'
@@ -104,12 +104,12 @@ class ACTConfig(PreTrainedConfig):
     ho_num_layers: int = 1
     # conv1d params
     ho_history_segment_num: int = 4
-    ho_history_segment_alpha: float = 0.5
-    ho_history_segment_decay: str = 'lienar'  # 'exponential' or 'linear' or None
+    ho_history_segment_alpha: float = 0.2
+    ho_history_segment_decay: str = 'linear'  # 'exponential' or 'linear' or None
     # —————————————————————————————————————————————————————————————————————————————————————
 
     # Segment understanding config
-    use_segment_understanding: bool = True
+    use_segment_understanding: bool = False
     seg_config: SegmentUnderstandingConfig = field(default_factory=SegmentUnderstandingConfig)
 
     # Input / output structure.
@@ -128,8 +128,8 @@ class ACTConfig(PreTrainedConfig):
     # Architecture.
     # Vision backbone.
     #  "dino", "resnet18", "convnext"
-    # vision_backbone: str = "resnet18"
-    vision_backbone: str = "convnext"  
+    vision_backbone: str = "resnet18"
+    # vision_backbone: str = "convnext"  
     # vision_backbone: str = "dino"
     pretrained_backbone_weights: str | None = "ResNet18_Weights.IMAGENET1K_V1"
     replace_final_stride_with_dilation: int = False

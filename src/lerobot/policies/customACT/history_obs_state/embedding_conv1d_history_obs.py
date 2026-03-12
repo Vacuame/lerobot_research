@@ -28,11 +28,12 @@ class WeightedSegmentPooling(nn.Module):
         alpha (float): 控制非均匀分段的参数，aplha越大，
         decay (str): 'exponential' 或 'linear' 或 None，控制段间加权方式。
     """
-    def __init__(self, num_segments=4, alpha=0.5, decay='exponential'):
+    def __init__(self, num_segments=4, alpha=0.3, decay='exponential'):#在config文件里改,alpha控制分段位置,alpha=0是均匀分段，alpha=1是极度前倾分段，decay控制段间权值，exponential是指数递增，linear是线性递增，None是平权
         super().__init__()
         self.num_segments = num_segments # 分段数
         self.alpha = alpha # 控制非均匀分段的参数
         self.decay = decay # 'exponential' 或 'linear' 或 None
+        self.segment_weights = nn.Parameter(torch.ones(self.num_segments))#新增可学习的段权重参数
 
     def _make_boundaries(self, T):#T是动作帧数
         diff = self.alpha
@@ -50,7 +51,7 @@ class WeightedSegmentPooling(nn.Module):
             cuts.append(max(pos, cuts[-1] + 1))  # 至少比前一个大1
         cuts.append(T) # [0,1,8,18,32]
         cuts = cuts[::-1] # [32,18,8,1,0]
-
+        # print(num_segments, cuts[0], cuts[1], cuts[2], cuts[3], cuts[4])
         return [(T-cuts[i], T-cuts[i+1]) for i in range(num_segments)] #T为32时得到分段[(0,14),(14,24),(24,31),(31,32)]
 
     def forward(self, x):
@@ -62,21 +63,22 @@ class WeightedSegmentPooling(nn.Module):
         # 先每段单独池化再加权，相当于每步的权重是w/L，否则段落的长度会影响每段的权值
         for boundary in boundaries:
                 seg = x[:, :, boundary[0]:boundary[1]]  # [B, C, L] 取时间轴的其中一段，第一段是[B, C, 14],第二段是[B, C, 10]，第三段是[B, C, 7]，第四段是[B, C, 1]
-                seg_mean = seg.mean(dim=-1)  # [B, C] 先对段做简单平均池化（得到每段的平均值）
-                segment_feats.append(seg_mean)#一共四段，每段的shape都是[B, C]，存到list里
+                seg_mean = seg.mean(dim=-1)  # [B, C] 先对段做简单平均池化（得到每段的平均值）[B, C]
+                segment_feats.append(seg_mean)#一共四段，每段的shape都是[B, C]，存到list里[[B, C], [B, C], [B, C], [B, C]]
         seg_feats = torch.stack(segment_feats, dim=-1)  # 将四段拼接成[B, C, num_segments]
 
-        # 段间权值
-        if self.decay == 'exponential': # 指数递增 比如[0.14, 0.37, 1.0]
-            weights = torch.exp(torch.linspace(-2.0, 0.0, self.num_segments, device=x.device))
-        elif self.decay == 'linear': # 线性递增 比如[0.1, 0.3, 0.5, 0.7, 1.0]
-            weights = torch.linspace(1/self.num_segments, 1.0, self.num_segments, device=x.device)
-        else: # 平权 [1, 1, 1, ...]
-            weights = torch.ones(self.num_segments, device=x.device)
-        weights = weights / weights.sum() # 归一化，保证加权后结果仍是加权平均（而不是加权求和）
-
-        out = torch.sum(seg_feats * weights[None, None, :], dim=-1)  # [B, C]（其中 weights[None, None, :]是扩展维度，使其到 [B, C, num_segments]）
-        return out #得到加权后的这一段的特征 [B, C]
+        # # 段间权值
+        # if self.decay == 'exponential': # 指数递增 比如[0.14, 0.37, 1.0]
+        #     weights = torch.exp(torch.linspace(-2.0, 0.0, self.num_segments, device=x.device))
+        # elif self.decay == 'linear': # 线性递增 比如[0.1, 0.3, 0.5, 0.7, 1.0]
+        #     weights = torch.linspace(1/self.num_segments, 1.0, self.num_segments, device=x.device)
+        # else: # 平权 [1, 1, 1, ...]
+        #     weights = torch.ones(self.num_segments, device=x.device)
+        # weights = weights / weights.sum() # 归一化，保证加权后结果仍是加权平均（而不是加权求和）
+        weights = torch.softmax(self.segment_weights, dim=0) # 将可学习的段权重参数通过 softmax 转换成权值
+        seg_feats = seg_feats * weights[None, None, :]   # [B, C, num_segments]
+        seg_feats = seg_feats.permute(0, 2, 1)           # [B, num_segments, C]
+        return seg_feats
     
 
 
@@ -89,38 +91,57 @@ class HistoryConv1dEmbedding(nn.Module): # 卷积特征
         self.history_segment_num = modeling_config.history_segment_num
         self.history_segment_alpha = modeling_config.history_segment_alpha
         self.history_segment_decay = modeling_config.history_segment_decay
-        
-        self.motion_encoder = nn.Sequential( # 三层卷积提取特征
+        #第一步：三层卷积提取特征
+        self.history_encoder = nn.Sequential( # 三层卷积提取特征
             # Layer 1
-            CausalConv1d(in_channels=config.robot_state_feature.shape[0], out_channels=64, kernel_size=3),
+            CausalConv1d(in_channels=config.robot_state_feature.shape[0], out_channels=64, kernel_size=3,dilation=1),
             nn.ReLU(),
             nn.BatchNorm1d(64),
             # Layer 2
-            CausalConv1d(in_channels=64, out_channels=128, kernel_size=3),
+            CausalConv1d(in_channels=64, out_channels=128, kernel_size=3,dilation=2),
             nn.ReLU(),
             nn.BatchNorm1d(128),
             # Layer 3
-            CausalConv1d(in_channels=128, out_channels=256, kernel_size=3),
+            CausalConv1d(in_channels=128, out_channels=256, kernel_size=3,dilation=4),
             nn.ReLU(),
             # nn.AdaptiveAvgPool1d(1),  # [B, 256, T] => [B, 256, 1]
             # nn.Flatten(start_dim=1),   # [B, 256]
             # nn.Linear(256, config.dim_model) # [B, 256] => [B, dim_model]
         )
+        #第二步：分段加权池化得到固定长度特征
         self.segment_pool = WeightedSegmentPooling(
             num_segments=self.history_segment_num,
             alpha=self.history_segment_alpha,
             decay=self.history_segment_decay
         )
+        #第三步：线性变换到模型维度
+        self.proj = nn.Sequential(
+            nn.Linear(256, config.dim_model),
+            nn.LayerNorm(config.dim_model) #这个可以考虑加一下
+        )
+        #第四步
+        self.history_pos_embedding = nn.Parameter(torch.zeros(1, self.history_segment_num, config.dim_model)) # 新增历史位置编码参数
 
-        self.proj = nn.Sequential( # input = # [B, 256]
-            nn.Flatten(start_dim=1), # [B, 256]
-            nn.Linear(256, config.dim_model) # [B, dim_model]
+        #第五步：Transformer编码器进一步融合历史信息
+        encoder_layer = nn.TransformerEncoderLayer(
+            d_model=config.dim_model,
+            nhead=8,
+            dim_feedforward=config.dim_model * 4,
+            dropout=0.1,
+            batch_first=True,
+            norm_first=True
+        )
+        self.history_transformer = nn.TransformerEncoder(
+            encoder_layer,
+            num_layers=1
         )
 
     def forward(self, x): # input = [B, T, state_dim]
         x = x.permute(0, 2, 1)  # [B, state_dim, T]
-        feat = self.motion_encoder(x)     # [B, 256, T]
-        pooled = self.segment_pool(feat)  # [B, 256]
-        out = self.proj(pooled)           # [B, dim_model]
+        feat = self.history_encoder(x)     # [B, 256, T]
+        pooled = self.segment_pool(feat)   # [B, num_segments, 256]
+        out = self.proj(pooled)            # [B, num_segments, dim_model]
+        out = out + self.history_pos_embedding # 加上历史位置编码
+        out = self.history_transformer(out) # [B, num_segments, dim_model] 进一步融合历史信息
         return out
 
