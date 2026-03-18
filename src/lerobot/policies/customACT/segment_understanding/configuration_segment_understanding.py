@@ -26,7 +26,7 @@ class SegmentUnderstandingConfig:
     r_global_dim: int = 256      # R pooling 后的全局表示维度（可 ≠ dim_model）
 
     # Pooling 方式： "mean" 或 "attention"
-    pooling: str = "mean"
+    pooling: str = "attention"  
 
     # ==============================
     # FK (机械臂末端位姿) 编码配置

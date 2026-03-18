@@ -32,28 +32,25 @@ import torchvision
 from torch import Tensor, nn
 from torchvision.models._utils import IntermediateLayerGetter
 from torchvision.ops.misc import FrozenBatchNorm2d
+from lerobot.policies.dino_act.dino_backbone import DinoV2Backbone
 
-from lerobot.policies.act.configuration_act import ACTConfig
+from lerobot.policies.customACT.configuration_customACT import ACTConfig
 from lerobot.policies.pretrained import PreTrainedPolicy
-from lerobot.utils.constants import ACTION, OBS_ENV_STATE, OBS_IMAGES, OBS_STATE
-
-
-# 输入数据 batch
-#      │
-#      ▼
-#  [ACTPolicy.forward()]
-#      │
-#      ├── 预处理数据（如mask、padding）
-#      ├── 调用模型 forward()
-#      ▼
-#  [ACT.forward()]
-#      │
-#      ├── 编码 → 解码 → 预测动作
-#      ▼
-#  输出预测动作 actions_hat
-#      │
-#      ├── 回传到 ACTPolicy
-#      └── ACTPolicy 计算 loss、评估
+from lerobot.utils.constants import ACTION, OBS_ENV_STATE, OBS_IMAGES, OBS_STATE, HIS_OBS_STATES
+#新增：自己的import
+from lerobot.policies.customACT.history_obs_state.modeling_history_obs import HistoryObsStateEmbedding
+from lerobot.policies.dino_act.backbone_res import ResNet18Backbone, get_custom_backbone
+from lerobot.policies.dino_act.convnext import ConvNeXtBackbone
+from lerobot.policies.dino_act.convnext_frame import ConvNeXtBackbone1
+from lerobot.policies.customACT.segment_understanding.modeling_segment_understanding import SegmentUnderstandingEmbedding
+from lerobot.policies.customACT.segment_understanding.utils.kinematics import SimpleKinematics
+from lerobot.policies.customACT.segment_understanding.utils.yolo_data_processer import YoloDataProcessor
+# from lerobot.policies.customACT.segment_understanding.utils.denormalize import denormalize_img_with_mean_stats,denormalize_obs_and_angle_to_rad
+# 由于想要未经初始化的数据，需要用到这个
+from lerobot.processor import PolicyProcessorPipeline
+from typing import Any
+from lerobot.processor.normalize_processor import NormalizerProcessorStep
+from lerobot.configs.types import FeatureType
 
 class ACTPolicy(PreTrainedPolicy):
     """
@@ -83,10 +80,8 @@ class ACTPolicy(PreTrainedPolicy):
             self.temporal_ensembler = ACTTemporalEnsembler(config.temporal_ensemble_coeff, config.chunk_size)
 
         self.reset()
-    
-    # 这个函数的作用是为优化器(optimizer)构造参数组:把模型参数分成两组 —— 一组是非 backbone 的参数(使用默认学习率)；另一组是backbone 的参数,并给这组单独指定 lr = self.config.optimizer_lr_backbone
+
     def get_optim_params(self) -> dict:
-        # dict是键值对
         # TODO(aliberts, rcadene): As of now, lr_backbone == lr
         # Should we remove this and just `return self.parameters()`?
         return [
@@ -108,47 +103,15 @@ class ACTPolicy(PreTrainedPolicy):
         ]
 
     def reset(self):
-        # 当环境(environment)重置时,模型或控制器也要同步重置它的内部状态。
-        # 如果配置中启用了“时间集成机制(temporal ensemble)”,就重置它；
-        # 否则就创建一个新的固定长度的动作队列 _action_queue,用于存放最近执行过的动作。
         """This should be called whenever the environment is reset."""
         if self.config.temporal_ensemble_coeff is not None:
             self.temporal_ensembler.reset()
         else:
             self._action_queue = deque([], maxlen=self.config.n_action_steps)
 
-
-
-
-
-
-
-
-
-# 环境调用 select_action()
-#       ↓
-# [是否启用 temporal_ensemble?]
-#       ├─ 是 → predict_action_chunk → temporal_ensembler.update() → 返回平滑动作
-#       │
-#       └─ 否
-#            ↓
-#      [队列是否为空?]
-#            ├─ 是 → predict_action_chunk → 转置 → 放入队列
-#            └─ 否
-#            ↓
-#      从队列取出一个动作 → 返回
-
-
     @torch.no_grad()
-    # 这个函数接受一个参数 batch,
-    # 它是一个 字典(dict),
-    # 字典的键是字符串(str),
-    # 值是张量(Tensor)；
-    # 函数的返回值类型也是一个 Tensor。
-    # select_action() 是 “推理时的动作选择接口”,
-    # 它封装了预测函数 predict_action_chunk(),
-    # 并通过队列机制或时间加权机制,逐步输出模型预测的连续动作。
     def select_action(self, batch: dict[str, Tensor]) -> Tensor:
+        
         """Select a single action given environment observations.
 
         This method wraps `select_actions` in order to return one action at a time for execution in the
@@ -158,114 +121,48 @@ class ACTPolicy(PreTrainedPolicy):
         self.eval()  # keeping the policy in eval mode as it could be set to train mode while queue is consumed
 
         if self.config.temporal_ensemble_coeff is not None:
-            actions = self.predict_action_chunk(batch)#调用 predict_action_chunk(batch) 获取动作序列(chunks)；
-            action = self.temporal_ensembler.update(actions)#把这些动作传入 temporal_ensembler,更新内部加权平均；
+            actions = self.predict_action_chunk(batch)
+            action = self.temporal_ensembler.update(actions)
             return action
 
         # Action queue logic for n_action_steps > 1. When the action_queue is depleted, populate it by
         # querying the policy.
-        # 检查动作队列是否为空
         if len(self._action_queue) == 0:
-            # 调用模型预测新的动作序列,但这里只取前 n_action_steps 个动作
             actions = self.predict_action_chunk(batch)[:, : self.config.n_action_steps]
-
-
 
             # `self.model.forward` returns a (batch_size, n_action_steps, action_dim) tensor, but the queue
             # effectively has shape (n_action_steps, batch_size, *), hence the transpose.
-            # transpose(0, 1) 的意思是交换第0维和第1维,这样我们可以按时间顺序取出每一帧动作
-            # deque.extend() 会把序列中的每个元素依次放入队列。
             self._action_queue.extend(actions.transpose(0, 1))
-
-        # popleft() 的意思是“弹出最左边的元素”,即最旧的那个。这就是当前步要执行的动作。
         return self._action_queue.popleft()
 
-
-
-
-
-#     环境观测 batch
-#       ↓
-# check image_features?
-#       ├─ 是 → 处理图像特征 → 放入 batch[OBS_IMAGES]
-#       └─ 否 → 直接使用 batch
-#       ↓
-# self.model(batch) → 预测动作序列 (batch_size, n_action_steps, action_dim)
-#       ↓
-# 返回动作张量 actions
-
-
-    # 给定环境的观测(observation),预测未来一段连续动作(action chunk),并返回这个动作序列张量。
     @torch.no_grad()
-    def predict_action_chunk(self, batch: dict[str, Tensor]) -> Tensor:
+    def predict_action_chunk(self, batch: dict[str, Tensor]) -> Tensor: # 实际运行时的100步动作预测
         """Predict a chunk of actions given environment observations."""
         self.eval()
 
         if self.config.image_features:
-            batch = dict(batch)  # 创建一个浅拷贝(shallow copy),防止在函数内部修改原始 batch。
+            batch = dict(batch)  # shallow copy so that adding a key doesn't modify the original
             batch[OBS_IMAGES] = [batch[key] for key in self.config.image_features]
 
-        actions = self.model(batch)[0]# 输出通常是一个元组或列表,第一个元素 [0] 就是 动作序列张量
+        actions = self.model(batch)[0]
         return actions
-    
 
-
-
-
-
-
-#     forward() 的作用是:
-
-# 把一个批次(batch)数据送入模型前向推理,得到预测动作,并计算训练/验证时使用的损失(loss)。
-
-# 如果启用了 VAE(变分自编码器),还会计算 KL 散度,并把它加到总损失上。
-
-# 返回值是 (loss, loss_dict):
-
-# loss:用于反向传播训练
-
-# loss_dict:记录各项损失(方便打印/日志)
-
-
-# 输入 batch
-#       ↓
-# check image_features? → 如果有 → 处理 OBS_IMAGES
-#       ↓
-# self.model(batch) → actions_hat, (mu_hat, log_sigma_x2_hat)
-#       ↓
-# 计算 l1_loss(考虑填充 mask)
-#       ↓
-# 是否使用 VAE?
-#       ├─ 是 → 计算 KL 散度 → loss = l1 + kl*weight
-#       └─ 否 → loss = l1
-#       ↓
-# 返回 loss, loss_dict
-
-
-    def forward(self, batch: dict[str, Tensor]) -> tuple[Tensor, dict]:
+    def forward(self, batch: dict[str, Tensor]) -> tuple[Tensor, dict]: # ACTPolicy的前向传播，里面调用了self.model
         """Run the batch through the model and compute the loss for training or validation."""
         if self.config.image_features:
             batch = dict(batch)  # shallow copy so that adding a key doesn't modify the original
             batch[OBS_IMAGES] = [batch[key] for key in self.config.image_features]
 
+        #DEBUG 输出batch的结构
+        # for key,tensor in batch.items(): # print出batch的内容，方便调试
+        #     print(f"{key}: {tensor.shape if isinstance(tensor, Tensor) else type(tensor)}")
 
-        # 模型前向推理
         actions_hat, (mu_hat, log_sigma_x2_hat) = self.model(batch)
 
-
-        # 计算 L1 损失
         l1_loss = (
             F.l1_loss(batch[ACTION], actions_hat, reduction="none") * ~batch["action_is_pad"].unsqueeze(-1)
         ).mean()
 
-
-
-        # unsqueeze(-1) 的意思是“在最后一维增加一个维度”,
-        # 假设 actions_hat 的形状是 (batch, seq_len, action_dim),
-        # 那么 batch["action_is_pad"] 是 (batch, seq_len),
-        # 为了能相乘,要变成 (batch, seq_len, 1)。
-
-        # 构建损失字典
         loss_dict = {"l1_loss": l1_loss.item()}
         if self.config.use_vae:
             # Calculate Dₖₗ(latent_pdf || standard_normal). Note: After computing the KL-divergence for
@@ -282,6 +179,10 @@ class ACTPolicy(PreTrainedPolicy):
 
         return loss, loss_dict
 
+    # 专门给yolo和fk用的预处理器设置函数，它们需要没有经过归一化的数据，然而lerobot传入的batch已经经过归一化了
+    def set_preprocessor(self, preprocessor: PolicyProcessorPipeline[dict[str, Any], dict[str, Any]] | None = None,):
+        self.model.preprocessor = preprocessor
+        
 
 class ACTTemporalEnsembler:
     def __init__(self, temporal_ensemble_coeff: float, chunk_size: int) -> None:
@@ -374,16 +275,6 @@ class ACTTemporalEnsembler:
         return action
 
 
-
-
-
-
-
-
-
-
-
-
 class ACT(nn.Module):
     """Action Chunking Transformer: The underlying neural network for ACTPolicy.
 
@@ -395,9 +286,11 @@ class ACT(nn.Module):
           cross-attention is used as the VAE decoder. For these terms, we drop the `vae_` prefix because we
           have an option to train this model without the variational objective (in which case we drop the
           `vae_encoder` altogether, and nothing about this model has anything to do with a VAE).
-          注意:在这段代码中,我们使用术语“vae_encoder”、“encoder”和“decoder”。其含义如下。
-        -根据关于变分自动编码器(vae)的文献,“vae_encoder”是模型中对目标数据(一系列动作)和条件(机器人关节空间)进行编码的部分。
-        -具有交叉关注的“编码器”(不是VAE编码器)和“解码器”(不是VASE解码器)的变压器用作VAE解码器。对于这些术语,我们去掉了“vae_”前缀,因为我们可以选择在没有变分目标的情况下训练这个模型(在这种情况下,我们完全去掉“vae_encoder”,这个模型与vae无关)。
+     注：本代码中使用术语`vae_encoder`、‘编码器’、`decoder`，其含义如下：
+        - `vae_encoder`遵循变分自编码器（VAE）相关文献定义，指模型中负责编码目标数据（动作序列）与条件（机器人关节空间）的部分。       
+        - 采用带交叉注意机制的Transformer模型作为VAE解码器，其编码器（非VAE编码器）与解码器（非VAE解码器）分别独立实现。
+          对于这些术语，我们省略了`vae_`前缀，因为该模型可选择性地不采用变分目标进行训练
+         （此时将完全移除`vae_encoder`，且该模型与VAE毫无关联）。
 
                                  Transformer
                                  Used alone for inference
@@ -420,205 +313,41 @@ class ACT(nn.Module):
                 inputs    └─────┼──┘  │ image emb.      │
                                 │    state emb.         │
                                 └───────────────────────┘
-        ACT 是一个“动作块(chunk)生成器”神经网络:训练时可选用一个 VAE 风格的编码器把历史动作/机器人状态编码成一个潜在向量(latent),然后把潜在向量 + 机器人状态 + 环境/相机特征喂入一个 Transformer encoder-decoder(encoder 做条件编码,decoder 类似 DETR 的 query 生成序列),最后 decoder 输出经过回归头得到一段动作序列(chunk_size 步的关节目标)。
     """
-# +-----------------------------------------------------------+
-# |                         Start                             |
-# +-----------------------------------------------------------+
-#                 |
-#                 v
-# +-----------------------------------------------------------+
-# | super().__init__()                                        |
-# +-----------------------------------------------------------+
-#                 |
-#                 v
-# +-----------------------------------------------------------+
-# | self.config = config                                      |
-# +-----------------------------------------------------------+
-#                 |
-#                 v
-# +-----------------------------------------------------------+
-# | if self.config.use_vae:                                   |
-# +-----------------------------------------------------------+
-#                 |
-#                 v
-#     +-------------------------------+    <─── VAE 分支开始
-#     | 创建 self.vae_encoder = ACTEncoder(..., is_vae_encoder=True) |
-#     +-------------------------------+
-#                 |
-#                 v
-#     +-------------------------------+
-#     | 创建 self.vae_encoder_cls_embed = nn.Embedding(1, dim_model) |
-#     +-------------------------------+
-#                 |
-#                 v
-#     +-------------------------------+
-#     | if self.config.robot_state_feature:                      |
-#     |   创建 self.vae_encoder_robot_state_input_proj = nn.Linear(..., dim_model) |
-#     +-------------------------------+
-#                 |
-#                 v
-#     +-------------------------------+
-#     | 创建 self.vae_encoder_action_input_proj = nn.Linear(action_feat_dim, dim_model) |
-#     +-------------------------------+
-#                 |
-#                 v
-#     +-------------------------------+
-#     | 创建 self.vae_encoder_latent_output_proj = nn.Linear(dim_model, latent_dim*2) |
-#     +-------------------------------+
-#                 |
-#                 v
-#     +-------------------------------+
-#     | 计算 num_input_token_encoder = 1 + config.chunk_size      |
-#     | if robot_state_feature: num_input_token_encoder += 1      |
-#     +-------------------------------+
-#                 |
-#                 v
-#     +-------------------------------+
-#     | register_buffer("vae_encoder_pos_enc",                       |
-#     |   create_sinusoidal_pos_embedding(num_input_token_encoder, dim_model).unsqueeze(0)) |
-#     +-------------------------------+
-#                 |
-#                 v
-#     +-------------------------------+    <─── VAE 分支结束
-#     | (返回到主流程)                                             |
-#     +-------------------------------+
-#                 |
-#                 v
-# +-----------------------------------------------------------+
-# | if self.config.image_features:                            |
-# |  - backbone_model = getattr(torchvision.models, vision_backbone)(...) |
-# |  - self.backbone = IntermediateLayerGetter(backbone_model, {"layer4":"feature_map"}) |
-# +-----------------------------------------------------------+
-#                 |
-#                 v
-# +-----------------------------------------------------------+
-# | 创建 Transformer 相关模块：                                 |
-# |  - self.encoder = ACTEncoder(config)                       |
-# |  - self.decoder = ACTDecoder(config)                       |
-# +-----------------------------------------------------------+
-#                 |
-#                 v
-# +-----------------------------------------------------------+
-# | Transformer encoder 的输入投影：                            |
-# | if robot_state_feature: self.encoder_robot_state_input_proj = nn.Linear(...) |
-# | if env_state_feature:   self.encoder_env_state_input_proj   = nn.Linear(...) |
-# | self.encoder_latent_input_proj = nn.Linear(latent_dim, dim_model) |
-# +-----------------------------------------------------------+
-#                 |
-#                 v
-# +-----------------------------------------------------------+
-# | if self.config.image_features:                            |
-# |  - self.encoder_img_feat_input_proj = nn.Conv2d(backbone_fc_in, dim_model, kernel_size=1) |
-# +-----------------------------------------------------------+
-#                 |
-#                 v
-# +-----------------------------------------------------------+
-# | 创建 positional embedding：                                |
-# |  - n_1d_tokens = 1 (+1 if robot_state_feature) (+1 if env_state_feature) |
-# |  - self.encoder_1d_feature_pos_embed = nn.Embedding(n_1d_tokens, dim_model) |
-# |  - if image_features: self.encoder_cam_feat_pos_embed = ACTSinusoidalPositionEmbedding2d(dim_model//2) |
-# +-----------------------------------------------------------+
-#                 |
-#                 v
-# +-----------------------------------------------------------+
-# | Decoder 相关：                                             |
-# |  - self.decoder_pos_embed = nn.Embedding(config.chunk_size, dim_model) |
-# +-----------------------------------------------------------+
-#                 |
-#                 v
-# +-----------------------------------------------------------+
-# | Action head：                                              |
-# |  - self.action_head = nn.Linear(dim_model, action_feature_dim) |
-# +-----------------------------------------------------------+
-#                 |
-#                 v
-# +-----------------------------------------------------------+
-# | self._reset_parameters()   ←—— 最后调用，做权重/参数初始化          |
-# +-----------------------------------------------------------+
-#                 |
-#                 v
-# +-----------------------------------------------------------+
-# |                           End                              |
-# +-----------------------------------------------------------+
+    
+    preprocessor: PolicyProcessorPipeline[dict[str, Any], dict[str, Any]] = None
 
-
-    # __init__ 是 ACT 类的构造函数——负责把这个网络需要的所有子模块（encoder/decoder、backbone、各种投影层、位置编码、输出头等）创建并连接好，同时把一些固定张量（buffer）和参数初始化规则也准备好。换言之：这里搭好“神经网络的骨架”和它的超参数接口，实际的计算在 forward 里发生。
     def __init__(self, config: ACTConfig):
         # BERT style VAE encoder with input tokens [cls, robot_state, *action_sequence].
         # The cls token forms parameters of the latent's distribution (like this [*means, *log_variances]).
         super().__init__()
         self.config = config
 
-        # VAE（变分自编码器）在训练时会引入随机采样
-        # 如果 self.config 这个对象里 use_vae 这个属性的值为真（True）
+        print('------customACT------') # customACT标记
+
         if self.config.use_vae:
             self.vae_encoder = ACTEncoder(config, is_vae_encoder=True)
-
-
-            # 创建一个 可学习的向量（embedding），作为 VAE encoder 的 cls token
-            # nn.Embedding 是一个把 整数索引 转换为 可学习向量 的查表层
             self.vae_encoder_cls_embed = nn.Embedding(1, config.dim_model)
-
-
-
             # Projection layer for joint-space configuration to hidden dimension.
-            # 这是一个投影层，用来把机器人在关节空间（joint-space）中的状态配置映射到模型的隐藏特征维度。
             if self.config.robot_state_feature:
                 self.vae_encoder_robot_state_input_proj = nn.Linear(
                     self.config.robot_state_feature.shape[0], config.dim_model
                 )
-
-
-            
-            # 用于将模型预测或示教的目标动作（目标关节角度或变化量）映射到隐藏特征维度的投影层
+            # Projection layer for action (joint-space target) to hidden dimension.
             self.vae_encoder_action_input_proj = nn.Linear(
                 self.config.action_feature.shape[0],
                 config.dim_model,
             )
-
-    
-            # 将编码器输出的隐藏特征向量投影成潜在空间参数（mean 和 log-variance），供 VAE 使用
-            # 输出是长度为 latent_dim*2 的向量：
-            # 前 latent_dim 个元素 → μ
-            # 后 latent_dim 个元素 → logσ²
             # Projection layer from the VAE encoder's output to the latent distribution's parameter space.
             self.vae_encoder_latent_output_proj = nn.Linear(config.dim_model, config.latent_dim * 2)
-            # Fixed sinusoidal positional embedding for the input to the VAE encoder. Unsqueeze for batch dimension.
-
-
-            
-            # 1 个 CLS token + chunk_size 个实际特征 token（动作或状态序列）
-            # 比如说[CLS token, feature_t0, feature_t1, feature_t2, feature_t3]
+            # Fixed sinusoidal positional embedding for the input to the VAE encoder. Unsqueeze for batch
+            # dimension.
             num_input_token_encoder = 1 + config.chunk_size
-
-
-            # 如果模型使用了机器人状态特征，就在输入 token 数量上再加 1
-            # 总 token 数 = CLS token + chunk_size 个动作 token + 机器人状态 token（如果有的话）
             if self.config.robot_state_feature:
                 num_input_token_encoder += 1
-
-
-
-            # 正弦位置编码告诉模型“第 i 个 token 在序列中的位置”，否则模型不知道 token 顺序
-            # register_buffer() 的作用是把一个张量注册为模型的 buffer（缓存），
-            # 这种张量不会被优化器更新（不像参数 param），但会随着模型一起保存和加载。
             self.register_buffer(
                 "vae_encoder_pos_enc",
-                # 创建 正弦位置编码（sinusoidal positional encoding）
-                # 参数
-                    # num_input_token_encoder → token 的数量（CLS + chunk_size + 状态 token）
-                    # config.dim_model → 每个 token 的向量维度（hidden size，例如 512）
-                # 输出：
-                    # 一个矩阵，形状 [num_input_token_encoder, dim_model]
-                    # 每一行对应一个 token 的位置编码向量
-                # 用途
-                    # Transformer 本身 没有顺序感
-                    # 正弦位置编码告诉模型“第 i 个 token 在序列中的位置”，
-                    # 否则模型不知道 token 顺序
                 create_sinusoidal_pos_embedding(num_input_token_encoder, config.dim_model).unsqueeze(0),
-                # Transformer 输入通常是 [batch_size, seq_len, dim_model]
-                #在最前面增加一个维度[seq_len, dim_model]变成[1, seq_len, dim_model]
             )
 
 
@@ -630,28 +359,45 @@ class ACT(nn.Module):
 
 
 
-        # 这一段代码的作用是：如果启用了图像特征，创建一个 ResNet backbone 提取高层图像特征（layer4），并通过 IntermediateLayerGetter 输出 feature map，用作编码器的图像输入 token。
-        # 输入图像 → backbone(ResNet) → layer4 feature map → 投影层 → Transformer encoder
+
+
+        # Backbone for image feature extraction.
+        #修改为DinoV2Backbone
         if self.config.image_features:
-            # 这一行的作用是 实例化一个 ResNet backbone，用于提取图像特征,getattr根据字符串形式的属性名，取出对应的属性或方法
-            # 相当于backbone_model = torchvision.models.resnet18(weights=...)  
-            backbone_model = getattr(torchvision.models, config.vision_backbone)(
-                # 控制 ResNet 的层数（深度），如 18、34、50、101、152
-                # 控制最后几层卷积是否用空洞卷积（dilation）替代 stride → 保留特征图分辨率
-                replace_stride_with_dilation=[False, False, config.replace_final_stride_with_dilation],
+            if self.config.vision_backbone == "dino":
+                self.backbone = DinoV2Backbone()
+            elif self.config.vision_backbone == "convnext":
+                self.backbone = ConvNeXtBackbone()
+            else:
+                backbone_model = getattr(torchvision.models, config.vision_backbone)(
+                    replace_stride_with_dilation=[False, False, config.replace_final_stride_with_dilation],
+                    weights=config.pretrained_backbone_weights,
+                    norm_layer=FrozenBatchNorm2d,
+                )
+                # Note: The assumption here is that we are using a ResNet model (and hence layer4 is the final
+                # feature map).
+                # Note: The forward method of this returns a dict: {"feature_map": output}.
+                self.backbone = IntermediateLayerGetter(backbone_model, return_layers={"layer4": "feature_map"})
 
-                # 是否使用 ImageNet 预训练权重
-                weights=config.pretrained_backbone_weights,
+        if self.config.image_features:
+            if config.vision_backbone == "dino":
+                self.encoder_img_feat_input_proj = nn.Conv2d(
+                    512, config.dim_model, kernel_size=1
+                )
+            elif config.vision_backbone == "convnext":
+                self.encoder_img_feat_input_proj = nn.Conv2d(
+                    512, config.dim_model, kernel_size=1
+                )
+            else:
+                self.encoder_img_feat_input_proj = nn.Conv2d(
+                    backbone_model.fc.in_features, config.dim_model, kernel_size=1
+                )
+        
 
-                # 替代默认 BatchNorm，用冻结的 BN（适合 finetune 或小 batch）
-                norm_layer=FrozenBatchNorm2d,
-            )
-            # Note: The assumption here is that we are using a ResNet model (and hence layer4 is the final
-            # feature map).
-            # 包装 backbone，让它的 forward 输出 指定层的特征图
-            # 参数return_layers:一个字典 {原层名: 新层名}，决定哪些层的输出要返回
-            # out["feature_map"] 就是输出原来 layer4 的特征图，
-            self.backbone = IntermediateLayerGetter(backbone_model, return_layers={"layer4": "feature_map"})
+
+
+
+
 
 
 
@@ -659,14 +405,8 @@ class ACT(nn.Module):
 
 
         # Transformer (acts as VAE decoder when training with the variational objective).
-        # 调用下面的actEncoder和actDecoder类，创建 Transformer 编码器和解码器
         self.encoder = ACTEncoder(config)
         self.decoder = ACTDecoder(config)
-
-
-
-
-
 
         # Transformer encoder input projections. The tokens will be structured like
         # [latent, (robot_state), (env_state), (image_feature_map_pixels)].
@@ -678,21 +418,68 @@ class ACT(nn.Module):
             self.encoder_env_state_input_proj = nn.Linear(
                 self.config.env_state_feature.shape[0], config.dim_model
             )
+
+        # 新增：历史动作embedding模块
+        if self.config.n_history_obs_states > 0:
+            self.history_obs_state_embedding = HistoryObsStateEmbedding(config)
+        
+
+
+
+
+
+
+
+        # 新增：实例分割理解模块
+        if self.config.use_segment_understanding:
+            # 初始化两个必需的插件：FK & YOLO
+            self.kinematics = SimpleKinematics(config.seg_config.urdf_path, config.seg_config.ee_frame_name)
+            self.yolo_data_processer = YoloDataProcessor(config.seg_config, config.device)
+            # 动态赋值config
+            yolo_nc = self.yolo_data_processer.yolo.nc
+            config.seg_config.num_classes = yolo_nc
+            config.seg_config.output_dim = config.dim_model
+             # 初始化模块
+            self.segment_understanding_embedding = SegmentUnderstandingEmbedding(config.seg_config)
+
+
+
+
+
+
         self.encoder_latent_input_proj = nn.Linear(config.latent_dim, config.dim_model)
+        
 
 
 
-        # 输入 (B, in_feature, H, W) → 输出 (B, dim_model, H, W),其中H,W = backbone 输出特征图的空间尺寸
-        if self.config.image_features:
-            self.encoder_img_feat_input_proj = nn.Conv2d(
-                backbone_model.fc.in_features, config.dim_model, kernel_size=1
-            )   
+
+        # backbone
+        
+
+        
+
+
+
+
+
+
+
+
         # Transformer encoder positional embeddings.
         n_1d_tokens = 1  # for the latent
         if self.config.robot_state_feature:
             n_1d_tokens += 1
+
         if self.config.env_state_feature:
             n_1d_tokens += 1
+
+        if self.config.n_history_obs_states > 0:# 历史动作token
+            n_1d_tokens += 1
+
+        if self.config.use_segment_understanding:# 实例分割理解 token
+            n_1d_tokens += 1
+
+
         self.encoder_1d_feature_pos_embed = nn.Embedding(n_1d_tokens, config.dim_model)
         if self.config.image_features:
             self.encoder_cam_feat_pos_embed = ACTSinusoidalPositionEmbedding2d(config.dim_model // 2)
@@ -702,11 +489,20 @@ class ACT(nn.Module):
         self.decoder_pos_embed = nn.Embedding(config.chunk_size, config.dim_model)
 
         # Final action regression head on the output of the transformer's decoder.
-        # 将高维向量转为相应的动作
         self.action_head = nn.Linear(config.dim_model, self.config.action_feature.shape[0])
-        
+
         self._reset_parameters()
 
+
+        # 打印模型结构
+        print("\n========== ACT MODEL STRUCT ==========")
+        print(self.backbone)
+        print("=====================================\n")
+
+
+
+
+        
 
     def _reset_parameters(self):
         """Xavier-uniform initialization of the transformer parameters as in the original code."""
@@ -717,139 +513,47 @@ class ACT(nn.Module):
                 
         """A forward pass through the Action Chunking Transformer (with optional VAE encoder).
 
-    #     `batch` should have the following structure:
-    #     {
-    #         [robot_state_feature] (optional): (B, state_dim) batch of robot states.
+        `batch` should have the following structure:
+        {
+            [robot_state_feature] (optional): (B, state_dim) batch of robot states.
 
-    #         [image_features]: (B, n_cameras, C, H, W) batch of images.
-    #             AND/OR
-    #         [env_state_feature]: (B, env_dim) batch of environment states.
+            [image_features]: (B, n_cameras, C, H, W) batch of images.
+                AND/OR
+            [env_state_feature]: (B, env_dim) batch of environment states.
 
-    #         [action_feature] (optional, only if training with VAE): (B, chunk_size, action dim) batch of actions.
-    #     }
+            [action_feature] (optional, only if training with VAE): (B, chunk_size, action dim) batch of actions.
+        }
 
-    #     Returns:
-    #         (B, chunk_size, action_dim) batch of action sequences
-    #         Tuple containing the latent PDF's parameters (mean, log(σ²)) both as (B, L) tensors where L is the
-    #         latent dimension.
-
-        
-    #     通过动作分块变换器的正向传递(带可选的VAE编码器)。
-    #     `批处理应具有以下结构:
-    #         {
-    #         [robot_state_feature](可选):(B,state_dim)一批机器人状态。
-    #         [image_features]:(B,n_cameras,C,H,W)批图像。AND/OR[env_state_feature]:(B,env_dim)批环境状态。
-    #         [action_feature](可选,仅当使用VAE进行训练时):(B,chunk_size,action-dim)一批操作。
-    #         }
-    #     返回:
-    #         (B,chunk_size,action_dim)一批动作序列
-    #         包含潜在PDF参数(均值、对数(σ²))的元组,均为(B,L)张量,其中L是潜在维度。
-
-
-
-# 输入
-# │
-# ├─(训练时)VAE Encoder (n_vae_encoder_layers 层, dim_model)
-# │      │
-# │      └─> [mu, log_sigma_x2] → 采样 latent (latent_dim)
-# │
-# ├─latent → 线性投影 → dim_model
-# ├─机器人状态 → 线性投影 → dim_model
-# ├─环境状态 → 线性投影 → dim_model
-# ├─图像特征(ResNet+1x1Conv) → dim_model
-# │
-# └─拼接所有 token → [seq_len, batch_size, dim_model]
-#       │
-#       └─> Transformer Encoder (n_encoder_layers 层, dim_model)
-#               │
-#               └─> 编码输出
-#                       │
-#                       └─> Transformer Decoder (n_decoder_layers 层, dim_model)
-#                               │
-#                               └─> [chunk_size, batch_size, dim_model]
-#                                       │
-#                                       └─> 线性层 (dim_model → action_dim)
-#                                               │
-#                                               └─> 输出动作序列 [batch_size, chunk_size, action_dim]
-    #     """
-
-
-
-
-# （这里的B必须一致）
-#         | 阶段                 | 数据结构           | `seq_len` 含义          | 举例                    |
-# | ------------------      | ----------------------- | --------------         | --------------------- |
-# | 数据加载阶段             | `[B, seq_len, C, H, W]` | 帧数（时间步）          | 20帧                   |
-# | VAE / embedding 阶段    | `[B, seq_len, D]`       | 每帧转成D维特征         | 20帧                   |
-# | 拼接进 Transformer 前    | `[seq_len, B, D]`       | token数量（可能>帧数） | 1个CLS + 3×20=61个token |
-
-
-
-
-
-# 一个batch可能包含多段序列,每段序列有 seq_len 帧,每帧是 C×H×W 的图像,一共 B 段序列。
-# batch = {
-#     "observation.image": torch.Tensor(B, seq_len, C, H, W),  # 视觉输入序列
-#     "observation.state": torch.Tensor(B, seq_len, state_dim), # 机器人状态序列
-#     "action": torch.Tensor(B, seq_len, action_dim),           # 动作序列
-#     "action_is_pad": torch.BoolTensor(B, seq_len),            # padding掩码
-# }
-
-
-
+        Returns:
+            (B, chunk_size, action_dim) batch of action sequences
+            Tuple containing the latent PDF's parameters (mean, log(σ²)) both as (B, L) tensors where L is the
+            latent dimension.
+        """
+    # 实际执行动作预测的位置
     def forward(self, batch: dict[str, Tensor]) -> tuple[Tensor, tuple[Tensor, Tensor] | tuple[None, None]]:
-        # 检查 VAE 是否使用
+
         if self.config.use_vae and self.training:
             assert ACTION in batch, (
                 "actions must be provided when using the variational objective in training mode."
             )
-        
-        # batch[OBS_IMAGES]其实就是拿batch["observation.image"]的tensor
-        # 这个tensor数据结构是 (B, seq_len, C, H, W)，第一个就是 batch_size的大小
         batch_size = batch[OBS_IMAGES][0].shape[0] if OBS_IMAGES in batch else batch[OBS_ENV_STATE].shape[0]
-        
-
-
-
-
 
         # Prepare the latent for input to the transformer encoder.
-        # 生成 latent token
-        # 仅当三者都满足时使用 VAE 分支
         if self.config.use_vae and ACTION in batch and self.training:
             # Prepare the input to the VAE encoder: [cls, *joint_space_configuration, *action_sequence].
             cls_embed = einops.repeat(
                 self.vae_encoder_cls_embed.weight, "1 d -> b 1 d", b=batch_size
             )  # (B, 1, D),为每个样本复制一个 class token embedding，作为序列的第 0 个 token。
-
-
             if self.config.robot_state_feature:
                 robot_state_embed = self.vae_encoder_robot_state_input_proj(batch[OBS_STATE])
                 robot_state_embed = robot_state_embed.unsqueeze(1)  # (B, 1, D)
-                # 把机器人状态当作序列中紧随 cls 的第二个 token（如果启用）
-
-
-
-
-            # 得到动作 token 的 embedding 序列，后续会和 cls（和 robot_state）拼接成完整的序列输入 VAE encoder。
             action_embed = self.vae_encoder_action_input_proj(batch[ACTION])  # (B, S, D)
 
-
-
-
-
-            # 构造 transformer encoder 能接受的批次级序列数据（batch-first 形式）。
-            # 拼接 cls token + 机器人状态 token（如果有）+ 动作 token 序列，形成完整的 VAE encoder 输入序列
-            # 含状态时：(B, 1, D) + (B, 1, D) + (B, S, D) -> (B, S+2, D)
-            # 不含状态时：(B, 1, D) + (B, S, D) -> (B, S+1, D)
             if self.config.robot_state_feature:
                 vae_encoder_input = [cls_embed, robot_state_embed, action_embed]  # (B, S+2, D)
             else:
                 vae_encoder_input = [cls_embed, action_embed]
             vae_encoder_input = torch.cat(vae_encoder_input, axis=1)
-
-
-
 
             # Prepare fixed positional embedding.
             # Note: detach() shouldn't be necessary but leaving it the same as the original code just in case.
@@ -858,102 +562,80 @@ class ACT(nn.Module):
             # Prepare key padding mask for the transformer encoder. We have 1 or 2 extra tokens at the start of the
             # sequence depending whether we use the input states or not (cls and robot state)
             # False means not a padding token.
-            # 创建形状 (B, n) 的布尔张量，全部元素为 False。这里 n 是 1（仅 cls）或 2（cls + robot_state）。
             cls_joint_is_pad = torch.full(
                 (batch_size, 2 if self.config.robot_state_feature else 1),
                 False,
                 device=batch[OBS_STATE].device,
             )
-
-
-
-            # 将前面填充 False 的（cls 与可选 robot_state）与动作的 padding mask 按序列维拼接，得到 shape (B, seq_len_total)
             key_padding_mask = torch.cat(
                 [cls_joint_is_pad, batch["action_is_pad"]], axis=1
             )  # (bs, seq+1 or 2)
 
-
-
-
-
             # Forward pass through VAE encoder to get the latent PDF parameters.
             cls_token_out = self.vae_encoder(
-                # .permute(1, 0, 2) 把维度改为 (seq_len_total, B, D)，正好符合 transformer 的约定。
                 vae_encoder_input.permute(1, 0, 2),
-                # 同理把 pos_embed 从 (1, seq_len_total, D) 调整为 (seq_len_total, 1, D)。这样在 transformer 内部通常会把它广播到 (seq_len_total, B, D)。
                 pos_embed=pos_embed.permute(1, 0, 2),
-                # 传入 (B, seq_len_total) 的布尔 mask，告诉 encoder 哪些位置是 padding。
                 key_padding_mask=key_padding_mask,
             )[0]  # select the class token, with shape (B, D)
-            # 可能vae_encoder(...) 直接返回 class token（比如 encoder 专门只输出 class token），此时 [0] 就是 (B, D)，与注释一致。
-
-
-
-
-            # 投影到潜变量参数（mu, log_sigma_x2）
             latent_pdf_params = self.vae_encoder_latent_output_proj(cls_token_out)
             mu = latent_pdf_params[:, : self.config.latent_dim]
             # This is 2log(sigma). Done this way to match the original implementation.
             log_sigma_x2 = latent_pdf_params[:, self.config.latent_dim :]
             # Sample the latent with the reparameterization trick.
             latent_sample = mu + log_sigma_x2.div(2).exp() * torch.randn_like(mu)
-
-
-
         else:
             # When not using the VAE encoder, we set the latent to be all zeros.
             mu = log_sigma_x2 = None
             # TODO(rcadene, alexander-soare): remove call to `.to` to speedup forward ; precompute and use buffer
-            # latent_sample 直接设为零向量，形状 (B, latent_dim)
             latent_sample = torch.zeros([batch_size, self.config.latent_dim], dtype=torch.float32).to(
                 batch[OBS_STATE].device
             )
 
         # Prepare transformer encoder inputs.
-
-        # 把 latent_sample（来自前面 VAE 的 (B, latent_dim)）先通过 encoder_latent_input_proj 投影到模型的 dim_model 维度，得到作为序列第一个 token 的向量，(B, latent_dim) → (B, dim_model)
         encoder_in_tokens = [self.encoder_latent_input_proj(latent_sample)]
-        # encoder_in_tokens是一个列表，后续会把其他 token 也 append 进去。
-        
         encoder_in_pos_embed = list(self.encoder_1d_feature_pos_embed.weight.unsqueeze(1))
-
-
         # Robot state token.
         if self.config.robot_state_feature:
             encoder_in_tokens.append(self.encoder_robot_state_input_proj(batch[OBS_STATE]))
-            # encoder_in_tokens 是一个列表，里面每个元素形状都是 (B, dim_model)
-            # 👉 是这样一个形状[torch.Size([B, dim_model]), torch.Size([B, dim_model])]
-        
-
         # Environment state token.
         if self.config.env_state_feature:
             encoder_in_tokens.append(self.encoder_env_state_input_proj(batch[OBS_ENV_STATE]))
-        # 同上[torch.Size([B, dim_model]), torch.Size([B, dim_model]), torch.Size([B, dim_model])]
-        # 后续通过torch.stack会变成 (seq_lens, B, dim_model)
+
+
+        # 新增：调用历史观测状态
+        if self.config.n_history_obs_states > 0:
+            history_obs_state_embed = self.history_obs_state_embedding(batch[HIS_OBS_STATES])  # (B, D)
+            print(f"history_obs_state_embed: {history_obs_state_embed.shape}") # debug 输出历史观测状态embedding的形状
+            encoder_in_tokens.append(history_obs_state_embed)
+
+        # 新增：调用实例分割理解模块
+        if self.config.use_segment_understanding:
+            cam_key = f"observation.images.{self.config.seg_config.camera_name}"
+
+            # 反归一化到 [0, 1] 范围，因为act的数据经过了mean-std归一化，不符合YOLO与FK输入需求
+            norm_step:NormalizerProcessorStep = self.preprocessor.steps[3]
+            imgs_for_yolo = norm_step._apply_transform(batch[cam_key], cam_key, FeatureType.VISUAL, inverse=True)
+            obs_state_rad = norm_step._apply_transform(batch[OBS_STATE], OBS_STATE, FeatureType.STATE, inverse=True) * (torch.pi / 180.0) # 1、反归一化 2、度转弧度
+            
+            # 传入YOLO和FK，并得到分割理解的embedding
+            yolo_r, yolo_mask = self.yolo_data_processer.get_yolo_data(imgs_for_yolo)
+            ee_pose = self.kinematics.forward_kinematics_batch(obs_state_rad)
+            segment_understanding_embed = self.segment_understanding_embedding(yolo_r, yolo_mask , ee_pose) #(B, D)
+            # 最后把embedding放入tokens
+            encoder_in_tokens.append(segment_understanding_embed)
 
         if self.config.image_features:
             # For a list of images, the H and W may vary but H*W is constant.
             # NOTE: If modifying this section, verify on MPS devices that
             # gradients remain stable (no explosions or NaNs).
-            # batch[OBS_IMAGES] 很可能是一个 list，里面每个元素对应一张相机拍到的一批图像（每个 img 本身 shape (B, C_in, H, W)）。
-            for img in batch[OBS_IMAGES]:# for循环是遍历每个相机的图像批次，两个相机是两次
-                # 对 img 提取特征图，返回的 feature_map shape 通常 (B, C_feat, H_feat, W_feat)。
+            # print(list(batch.keys()))
+            for img in batch[OBS_IMAGES]:
                 cam_features = self.backbone(img)["feature_map"]
-                # 计算特征图的正弦位置编码，shape (B, C_feat, H_feat, W_feat)
                 cam_pos_embed = self.encoder_cam_feat_pos_embed(cam_features).to(dtype=cam_features.dtype)
-
-                # 将 backbone 的原始 channel（C_feat）投影到 dim_model，得到 shape (B, dim_model, H_feat, W_feat)。
                 cam_features = self.encoder_img_feat_input_proj(cam_features)
 
-
-
-
-                # 把每个特征图的空间位置 (h, w) 展平成序列维 (h*w)，并把 channel 维作为特征维 c,c即dim_model
                 # Rearrange features to (sequence, batch, dim).
-                # cam_features 从 (B, dim_model, H_feat, W_feat) 变为 (H_feat*W_feat, B, dim_model)
                 cam_features = einops.rearrange(cam_features, "b c h w -> (h w) b c")
-
-                # cam_pos_embed 从 (B, dim_model, H_feat, W_feat)变为 (H_feat*W_feat, B, dim_model)。
                 cam_pos_embed = einops.rearrange(cam_pos_embed, "b c h w -> (h w) b c")
 
                 # Extend immediately instead of accumulating and concatenating

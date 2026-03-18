@@ -90,6 +90,7 @@ class ACTConfig(PreTrainedConfig):
         kl_weight: The weight to use for the KL-divergence component of the loss if the variational objective
             is enabled. Loss is then calculated as: `reconstruction_loss + kl_weight * kld_loss`.
     """
+ # —————————————————————————————————————————————————————————————————————————————————————
 
     # 新增：自定义参数
     n_history_obs_states:int = 0 # 若 = 0 则关闭此功能，填多少帧
@@ -108,6 +109,8 @@ class ACTConfig(PreTrainedConfig):
     ho_history_segment_decay: str = 'linear'  # 'exponential' or 'linear' or None
     # —————————————————————————————————————————————————————————————————————————————————————
 
+
+
     # Segment understanding config
     use_segment_understanding: bool = False
     seg_config: SegmentUnderstandingConfig = field(default_factory=SegmentUnderstandingConfig)
@@ -124,6 +127,8 @@ class ACTConfig(PreTrainedConfig):
             "ACTION": NormalizationMode.MEAN_STD,
         }
     )
+
+ # ————————————————————————————————————————————————————————————————————————————————————
 
     # Architecture.
     # Vision backbone.
