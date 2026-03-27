@@ -45,6 +45,7 @@ from lerobot.policies.dino_act.convnext_frame import ConvNeXtBackbone1
 from lerobot.policies.customACT.segment_understanding.modeling_segment_understanding import SegmentUnderstandingEmbedding
 from lerobot.policies.customACT.segment_understanding.utils.kinematics import SimpleKinematics
 from lerobot.policies.customACT.segment_understanding.utils.yolo_data_processer import YoloDataProcessor
+from lerobot.policies.customACT.visibility_aware_fusion import VisibilityAwareMultiViewFusion
 # from lerobot.policies.customACT.segment_understanding.utils.denormalize import denormalize_img_with_mean_stats,denormalize_obs_and_angle_to_rad
 # 由于想要未经初始化的数据，需要用到这个
 from lerobot.processor import PolicyProcessorPipeline
@@ -182,6 +183,12 @@ class ACTPolicy(PreTrainedPolicy):
     # 专门给yolo和fk用的预处理器设置函数，它们需要没有经过归一化的数据，然而lerobot传入的batch已经经过归一化了
     def set_preprocessor(self, preprocessor: PolicyProcessorPipeline[dict[str, Any], dict[str, Any]] | None = None,):
         self.model.preprocessor = preprocessor
+
+    def set_visibility_detector(self, detector: Any) -> None:
+        self.model.set_visibility_detector(detector)
+
+    def get_last_visibility_debug_info(self) -> dict[str, Any] | None:
+        return self.model.last_visibility_debug_info
         
 
 class ACTTemporalEnsembler:
@@ -322,6 +329,9 @@ class ACT(nn.Module):
         # The cls token forms parameters of the latent's distribution (like this [*means, *log_variances]).
         super().__init__()
         self.config = config
+        self.overall_image_key = "observation.images.overall"
+        self.robot1_image_key = "observation.images.robot1"
+        self.last_visibility_debug_info: dict[str, Any] | None = None
 
         print('------customACT------') # customACT标记
 
@@ -392,6 +402,18 @@ class ACT(nn.Module):
                 self.encoder_img_feat_input_proj = nn.Conv2d(
                     backbone_model.fc.in_features, config.dim_model, kernel_size=1
                 )
+
+        self.visibility_aware_fusion = None
+        if self.config.use_visibility_aware_fusion:
+            self.visibility_aware_fusion = VisibilityAwareMultiViewFusion(
+                detector=None,
+                target_class_name=config.visibility_target_class_name,
+                edge_thresh=config.visibility_edge_thresh,
+                fusion_mode=config.visibility_fusion_mode,
+                concat_output_dim=config.dim_model if config.visibility_fusion_mode == "weighted_concat" else None,
+                input_feature_dim=config.dim_model,
+                eps=config.visibility_fusion_eps,
+            )
         
 
 
@@ -504,6 +526,38 @@ class ACT(nn.Module):
 
         
 
+    def set_visibility_detector(self, detector: Any) -> None:
+        if self.visibility_aware_fusion is None:
+            raise RuntimeError("Visibility-aware fusion is disabled. Set `use_visibility_aware_fusion=True` first.")
+        self.visibility_aware_fusion.set_detector(detector)
+
+    def _get_normalizer_step(self) -> NormalizerProcessorStep | None:
+        if self.preprocessor is None or not hasattr(self.preprocessor, "steps"):
+            return None
+        for step in self.preprocessor.steps:
+            if isinstance(step, NormalizerProcessorStep):
+                return step
+        return None
+
+    def _prepare_image_for_detector(self, image: Tensor, feature_name: str) -> Tensor:
+        normalizer_step = self._get_normalizer_step()
+        if normalizer_step is None:
+            return image
+
+        try:
+            return normalizer_step._apply_transform(image, feature_name, FeatureType.VISUAL, inverse=True)
+        except Exception:
+            return image
+
+    def _encode_image_to_tokens(self, image: Tensor) -> tuple[Tensor, Tensor]:
+        cam_features = self.backbone(image)["feature_map"]
+        cam_pos_embed = self.encoder_cam_feat_pos_embed(cam_features).to(dtype=cam_features.dtype)
+        cam_features = self.encoder_img_feat_input_proj(cam_features)
+
+        cam_features = einops.rearrange(cam_features, "b c h w -> b (h w) c")
+        cam_pos_embed = einops.rearrange(cam_pos_embed, "b c h w -> b (h w) c")
+        return cam_features, cam_pos_embed
+
     def _reset_parameters(self):
         """Xavier-uniform initialization of the transformer parameters as in the original code."""
         for p in chain(self.encoder.parameters(), self.decoder.parameters()):
@@ -531,6 +585,7 @@ class ACT(nn.Module):
         """
     # 实际执行动作预测的位置
     def forward(self, batch: dict[str, Tensor]) -> tuple[Tensor, tuple[Tensor, Tensor] | tuple[None, None]]:
+        self.last_visibility_debug_info = None
 
         if self.config.use_vae and self.training:
             assert ACTION in batch, (
@@ -634,18 +689,45 @@ class ACT(nn.Module):
             # For a list of images, the H and W may vary but H*W is constant.
             # NOTE: If modifying this section, verify on MPS devices that
             # gradients remain stable (no explosions or NaNs).
-            # print(list(batch.keys()))
-            for img in batch[OBS_IMAGES]:
-                cam_features = self.backbone(img)["feature_map"]
-                cam_pos_embed = self.encoder_cam_feat_pos_embed(cam_features).to(dtype=cam_features.dtype)
-                cam_features = self.encoder_img_feat_input_proj(cam_features)
+            remaining_image_keys = list(self.config.image_features)
 
-                # Rearrange features to (sequence, batch, dim).
-                cam_features = einops.rearrange(cam_features, "b c h w -> (h w) b c")
-                cam_pos_embed = einops.rearrange(cam_pos_embed, "b c h w -> (h w) b c")
+            if (
+                self.visibility_aware_fusion is not None
+                and self.overall_image_key in batch
+                and self.robot1_image_key in batch
+            ):
+                overall_feature, overall_pos_embed = self._encode_image_to_tokens(batch[self.overall_image_key])
+                robot1_feature, _ = self._encode_image_to_tokens(batch[self.robot1_image_key])
 
-                # Extend immediately instead of accumulating and concatenating
-                # Convert to list to extend properly
+                overall_image_for_detector = self._prepare_image_for_detector(
+                    batch[self.overall_image_key], self.overall_image_key
+                )
+                robot1_image_for_detector = self._prepare_image_for_detector(
+                    batch[self.robot1_image_key], self.robot1_image_key
+                )
+
+                fused_feature, self.last_visibility_debug_info = self.visibility_aware_fusion(
+                    overall_image=overall_image_for_detector,
+                    robot1_image=robot1_image_for_detector,
+                    overall_feature=overall_feature,
+                    robot1_feature=robot1_feature,
+                )
+
+                fused_feature = fused_feature.transpose(0, 1)
+                fused_pos_embed = overall_pos_embed.transpose(0, 1)
+                encoder_in_tokens.extend(list(fused_feature))
+                encoder_in_pos_embed.extend(list(fused_pos_embed))
+
+                remaining_image_keys = [
+                    image_key
+                    for image_key in remaining_image_keys
+                    if image_key not in {self.overall_image_key, self.robot1_image_key}
+                ]
+
+            for image_key in remaining_image_keys:
+                cam_features, cam_pos_embed = self._encode_image_to_tokens(batch[image_key])
+                cam_features = cam_features.transpose(0, 1)
+                cam_pos_embed = cam_pos_embed.transpose(0, 1)
                 encoder_in_tokens.extend(list(cam_features))
                 encoder_in_pos_embed.extend(list(cam_pos_embed))
 

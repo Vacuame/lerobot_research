@@ -115,6 +115,13 @@ class ACTConfig(PreTrainedConfig):
     use_segment_understanding: bool = False
     seg_config: SegmentUnderstandingConfig = field(default_factory=SegmentUnderstandingConfig)
 
+    # Visibility-aware dual-view fusion for `overall` and `robot1`.
+    use_visibility_aware_fusion: bool = True
+    visibility_fusion_mode: str = "weighted_concat"
+    visibility_target_class_name: str = "block"
+    visibility_edge_thresh: int = 10
+    visibility_fusion_eps: float = 1e-6
+
     # Input / output structure.
     n_obs_steps: int = 1
     chunk_size: int = 100
@@ -188,6 +195,10 @@ class ACTConfig(PreTrainedConfig):
         if self.n_obs_steps != 1:
             raise ValueError(
                 f"Multiple observation steps not handled yet. Got `nobs_steps={self.n_obs_steps}`"
+            )
+        if self.visibility_fusion_mode not in {"weighted_concat", "weighted_sum"}:
+            raise ValueError(
+                f"`visibility_fusion_mode` must be 'weighted_concat' or 'weighted_sum'. Got {self.visibility_fusion_mode}."
             )
 
     def get_optimizer_preset(self) -> AdamWConfig:
