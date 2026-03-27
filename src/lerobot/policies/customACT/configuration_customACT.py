@@ -112,6 +112,9 @@ class ACTConfig(PreTrainedConfig):
     use_segment_understanding: bool = False
     seg_config: SegmentUnderstandingConfig = field(default_factory=SegmentUnderstandingConfig)
 
+    # YOLO mask
+    use_mask_weight: bool = True
+
     # Input / output structure.
     n_obs_steps: int = 1
     chunk_size: int = 100
@@ -126,11 +129,11 @@ class ACTConfig(PreTrainedConfig):
     )
 
     # Architecture.
-    # Vision backbone.
-    #  "dino", "resnet18", "convnext"
+    # 模型可选: "dino", "resnet18", "convnext"
     vision_backbone: str = "resnet18"
     # vision_backbone: str = "convnext"  
     # vision_backbone: str = "dino"
+
     pretrained_backbone_weights: str | None = "ResNet18_Weights.IMAGENET1K_V1"
     replace_final_stride_with_dilation: int = False
     # Transformer layers.
@@ -229,5 +232,9 @@ class ACTConfig(PreTrainedConfig):
     @property
     def reward_delta_indices(self) -> None:
         return None
+    
+    @property
+    def use_yolo(self) -> bool:
+        return self.use_mask_weight or self.use_segment_understanding
 
 

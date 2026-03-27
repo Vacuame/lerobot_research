@@ -50,10 +50,10 @@ class REncoder(nn.Module):
 
         self.pooling = config.pooling  # "mean" 或 "attention"
         if self.pooling == "attention":
-            self.attn_query = nn.Parameter(torch.randn(config.r_token_dim))
+            self.attn_query = nn.Parameter(torch.randn(config.r_token_dim)) # 这里query是一个直接用的向量，而 self attetion 的是x计算出n个query
 
     def forward(self, R, R_mask):
-        cls_ids = R[..., 0].long()       # [B, N]
+        cls_ids = R[..., 0].long()       # [B, N] long类型用于nn.Embedding
         r_num   = R[..., 1:]             # [B, N, r_numeric_dim]
 
         # 1. cls embedding
@@ -72,10 +72,10 @@ class REncoder(nn.Module):
             e_token = e_token * mask
             e_pooled = e_token.sum(dim=1) / mask.sum(dim=1).clamp(min=1)  # [B, r_token_dim]
         elif self.pooling == "attention":
-            scores = torch.einsum("bnd,d->bn", e_token, self.attn_query)   # [B, N]
-            scores = scores.masked_fill(~R_mask, -1e9)
-            attn = F.softmax(scores, dim=1)                                 # [B, N]
-            e_pooled = torch.einsum("bn,bnd->bd", attn, e_token)           # [B, r_token_dim]
+            scores = torch.einsum("bnd,d->bn", e_token, self.attn_query)   # [B, N]     对每个物体算分
+            scores = scores.masked_fill(~R_mask, -1e9)      # 对不存在的物体分数设为 -inf，softmax 后权重为0
+            attn = F.softmax(scores, dim=1)                                 # [B, N]        激活函数
+            e_pooled = torch.einsum("bn,bnd->bd", attn, e_token)           # [B, r_token_dim]       代入分数的池化，计算整体特征
         else:
             raise ValueError("Unknown pooling type")
 
@@ -87,7 +87,7 @@ class REncoder(nn.Module):
 
 # FK 编码器，对FK进行简单处理即可（因为FK本身也是挺简单的数据）
 # 将低维特征映射到嵌入空间的标准做法就是 2 层带 ReLU 的 MLP
-class FKEncoder(nn.Module):
+class FKEncoder(nn.Module): #TODO 以后可能试试先归一化？
     def __init__(self, config: SegmentUnderstandingConfig):
         super().__init__()
         self.mlp = nn.Sequential(

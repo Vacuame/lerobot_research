@@ -471,7 +471,10 @@ def record(cfg: RecordConfig) -> LeRobotDataset: # 实际开始录制
         obs_window = deque(maxlen=cfg.policy.n_history_obs_states)
     
     #新增：如果用到了实例分割模块，将预处理传入customACT
-    if policy is not None and isinstance(policy, customACT) and isinstance(policy.config, customACTConfig) and policy.config.use_segment_understanding:
+    if (policy is not None and 
+        isinstance(policy, customACT) and 
+        isinstance(policy.config, customACTConfig) and 
+        (policy.config.use_segment_understanding or policy.config.use_mask_weight)):
         policy.set_preprocessor(preprocessor)
 
     robot.connect()

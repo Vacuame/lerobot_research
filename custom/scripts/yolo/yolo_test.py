@@ -7,6 +7,79 @@ def print_label_names(model_path):
     names = model.names
     print(names)
 
+import torch
+import torch.nn.functional as F
+from torchvision.transforms import GaussianBlur
+
+import torch
+import torch.nn.functional as F
+from torchvision.transforms import GaussianBlur
+
+def yolo_result_to_soft_mask(result, image_size, kernel_size=7, sigma=2.0):
+
+    H, W = image_size
+    
+    # ================= 自动检测设备 =================
+    if result.masks is not None:
+        device = result.masks.data.device
+    elif result.boxes is not None:
+        device = result.boxes.conf.device
+    else:
+        device = torch.device('cpu')
+
+
+    hard_mask = torch.zeros((1, H, W), dtype=torch.float32, device=device)
+
+    # 如果有实例分割masks，优先使用它们；否则使用边界框信息生成掩码
+    if result.masks is not None:
+        # 实例分割掩码
+        masks = result.masks.data          # [N, H, W]
+        confs = result.boxes.conf          # [N]
+        
+        for i in range(len(masks)):
+            # 置信度加权掩码
+            mask_i = F.interpolate(
+                masks[i].unsqueeze(0).unsqueeze(0).float(),  # [1, 1, h, w]
+                size=(H, W),
+                mode='bilinear',
+                align_corners=False
+            ).squeeze(0).squeeze(0)          # [H, W]
+            
+            conf_i = confs[i].item()         # 标量置信度
+            
+            # 取最大值（多物体重叠区域保留最高置信度）
+            weighted_mask = mask_i * conf_i
+            hard_mask[0] = torch.maximum(hard_mask[0], weighted_mask)
+
+    elif result.boxes is not None:
+        # 只有边界框（无分割掩码）
+        boxes = result.boxes
+        for i in range(len(boxes)):
+            conf = boxes.conf[i].item()
+            x1, y1, x2, y2 = boxes.xyxy[i].cpu().numpy().astype(int)
+            
+            # 裁剪到图像范围内
+            x1, y1 = max(0, x1), max(0, y1)
+            x2, y2 = min(W, x2), min(H, y2)
+            
+            # 用置信度填充边界框区域（在正确设备上创建张量）
+            conf_tensor = torch.tensor(conf, device=device)
+            hard_mask[0, y1:y2, x1:x2] = torch.maximum(
+                hard_mask[0, y1:y2, x1:x2],
+                conf_tensor
+            )
+    
+    # 3. 高斯模糊平滑（生成软掩码）
+    if hard_mask.max() > 0:  # 有物体才模糊
+        blur = GaussianBlur(kernel_size=kernel_size, sigma=sigma)
+        soft_mask = blur(hard_mask.unsqueeze(0))  # [1, 1, H, W]
+        soft_mask = soft_mask.squeeze(0)          # [1, H, W]
+        soft_mask = torch.clamp(soft_mask, 0, 1)  # 确保范围 0-1
+    else:
+        soft_mask = hard_mask  # 无物体时保持全 0
+    
+    return soft_mask
+
 def draw_results_on_frame(model,frame,results):
     h, w = frame.shape[:2]
     
@@ -73,6 +146,11 @@ def yolo_seg_picture(
             device=0,   # 使用 GPU 0
             tracker="botsort.yaml"  # 指定用 BoT-SORT
         )
+
+    #DEBUG 将 YOLO 结果转换为软掩码，以.csv输出
+    # mask = yolo_result_to_soft_mask(results[0], frame.shape[:2], kernel_size=7, sigma=2.0)
+    # mask = mask.cpu().squeeze(0).numpy()
+    # np.savetxt('mask.csv', mask, fmt='%.6f', delimiter=',')
 
     frame = draw_results_on_frame(model,frame,results)
     show = resize_for_display(frame, max_size=1000)
@@ -188,11 +266,11 @@ if __name__ == "__main__":
 
     # yolo_seg_camera("yolo11l-seg.pt")
 
-    yolo_seg_camera("runs/segment/grab_block/weights/best.pt")
+    #yolo_seg_camera("runs/segment/grab_block/weights/best.pt")
 
     # yolo_seg_picture(model_path="runs/segment/train4/weights/best.pt",picture_path="custom/scripts/yolo/image/test1.jpg")
-    # yolo_seg_picture(model_path="yolo11l-seg.pt",picture_path="custom/scripts/yolo/image/sheep.jpg")
-
+    yolo_seg_picture(model_path="yolo11l-seg.pt",picture_path="custom/scripts/yolo/image/sheep.jpg")
+    
 
     #print_label_names()
 

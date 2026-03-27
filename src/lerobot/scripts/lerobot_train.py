@@ -330,7 +330,9 @@ def train(cfg: TrainPipelineConfig, accelerator: Accelerator | None = None):
         logging.info("Start offline training on a fixed dataset")
 
     # 如果用到了实例分割模块，将预处理传入customACT
-    if isinstance(policy, customACT) and isinstance(policy.config, customACTConfig) and policy.config.use_segment_understanding:
+    if (isinstance(policy, customACT) and 
+        isinstance(policy.config, customACTConfig) and 
+        (policy.config.use_segment_understanding or policy.config.use_mask_weight)):
         policy.set_preprocessor(preprocessor)
 
     for _ in range(step, cfg.steps):    # 开始循环

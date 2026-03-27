@@ -45,6 +45,7 @@ from lerobot.policies.dino_act.convnext_frame import ConvNeXtBackbone1
 from lerobot.policies.customACT.segment_understanding.modeling_segment_understanding import SegmentUnderstandingEmbedding
 from lerobot.policies.customACT.segment_understanding.utils.kinematics import SimpleKinematics
 from lerobot.policies.customACT.segment_understanding.utils.yolo_data_processer import YoloDataProcessor
+from lerobot.policies.customACT.mask_weight.mask_weight import yolo_result_to_soft_mask
 # from lerobot.policies.customACT.segment_understanding.utils.denormalize import denormalize_img_with_mean_stats,denormalize_obs_and_angle_to_rad
 # 由于想要未经初始化的数据，需要用到这个
 from lerobot.processor import PolicyProcessorPipeline
@@ -353,14 +354,6 @@ class ACT(nn.Module):
 
 
 
-
-
-
-
-
-
-
-
         # Backbone for image feature extraction.
         #修改为DinoV2Backbone
         if self.config.image_features:
@@ -396,14 +389,6 @@ class ACT(nn.Module):
 
 
 
-
-
-
-
-
-
-
-
         # Transformer (acts as VAE decoder when training with the variational objective).
         self.encoder = ACTEncoder(config)
         self.decoder = ACTDecoder(config)
@@ -423,47 +408,23 @@ class ACT(nn.Module):
         if self.config.n_history_obs_states > 0:
             self.history_obs_state_embedding = HistoryObsStateEmbedding(config)
         
-
-
-
-
-
-
-
+        # 如果会用到yolo
+        if self.config.use_yolo:
+            self.yolo_data_processer = YoloDataProcessor(config.seg_config, config.device)
         # 新增：实例分割理解模块
         if self.config.use_segment_understanding:
-            # 初始化两个必需的插件：FK & YOLO
+            # 初始化必需的插件
             self.kinematics = SimpleKinematics(config.seg_config.urdf_path, config.seg_config.ee_frame_name)
-            self.yolo_data_processer = YoloDataProcessor(config.seg_config, config.device)
             # 动态赋值config
             yolo_nc = self.yolo_data_processer.yolo.nc
             config.seg_config.num_classes = yolo_nc
             config.seg_config.output_dim = config.dim_model
              # 初始化模块
             self.segment_understanding_embedding = SegmentUnderstandingEmbedding(config.seg_config)
-
-
-
-
-
+        
 
         self.encoder_latent_input_proj = nn.Linear(config.latent_dim, config.dim_model)
         
-
-
-
-
-        # backbone
-        
-
-        
-
-
-
-
-
-
-
 
         # Transformer encoder positional embeddings.
         n_1d_tokens = 1  # for the latent
@@ -494,13 +455,11 @@ class ACT(nn.Module):
         self._reset_parameters()
 
 
+
         # 打印模型结构
         print("\n========== ACT MODEL STRUCT ==========")
         print(self.backbone)
         print("=====================================\n")
-
-
-
 
         
 
@@ -611,9 +570,6 @@ class ACT(nn.Module):
             encoder_in_tokens.extend(list(history_obs_state_embed))
             # print(f"encoder_in_tokens length after adding history_obs_state_embed: {len(encoder_in_tokens)}") # debug 输出添加历史观测状态embedding后encoder_in_tokens的长度:6
 
-
-
-
         # 新增：调用实例分割理解模块
         if self.config.use_segment_understanding:
             cam_key = f"observation.images.{self.config.seg_config.camera_name}"
@@ -629,18 +585,53 @@ class ACT(nn.Module):
             segment_understanding_embed = self.segment_understanding_embedding(yolo_r, yolo_mask , ee_pose) #(B, D)
             # 最后把embedding放入tokens
             encoder_in_tokens.append(segment_understanding_embed)
+        
 
         if self.config.image_features:
             # For a list of images, the H and W may vary but H*W is constant.
             # NOTE: If modifying this section, verify on MPS devices that
             # gradients remain stable (no explosions or NaNs).
             # print(list(batch.keys()))
-            for img in batch[OBS_IMAGES]:
-                cam_features = self.backbone(img)["feature_map"]
-                cam_pos_embed = self.encoder_cam_feat_pos_embed(cam_features).to(dtype=cam_features.dtype)
-                cam_features = self.encoder_img_feat_input_proj(cam_features)
 
-                # Rearrange features to (sequence, batch, dim).
+            img_keys = [k for k in batch.keys() if k.startswith(OBS_IMAGES + ".")]
+            for img_key in img_keys:
+                img = batch[img_key]    # [8, 3, 480, 640]
+                cam_features = self.backbone(img)["feature_map"]    # [8, 3, 480, 640] -> [8, 512, 15, 20]
+                cam_pos_embed = self.encoder_cam_feat_pos_embed(cam_features).to(dtype=cam_features.dtype)
+
+                if self.config.use_mask_weight: # if部分是yolo_mask_weight的内容
+                    # 提取mask
+                    norm_step:NormalizerProcessorStep = self.preprocessor.steps[3]
+                    imgs_for_yolo = norm_step._apply_transform(img, img_key, FeatureType.VISUAL, inverse=True)
+                    yolo_results = self.yolo_data_processer.get_yolo_results(imgs_for_yolo)
+                    yolo_mask = yolo_result_to_soft_mask(yolo_results)
+
+                    # 处理mask形状
+                    target_h, target_w = cam_features.shape[-2:]
+                    mask_resized = torch.nn.functional.interpolate(
+                        yolo_mask,
+                        size=(target_h, target_w),
+                        mode='bilinear',
+                        align_corners=False
+                    )
+                    mask_resized = mask_resized.to(dtype=cam_features.dtype, device=cam_features.device)
+
+                    # 用mask处理feature
+                    mask_resized = torch.clamp(mask_resized, 0.0, 1.0) # 确保mask值在合理范围内
+                    alpha = getattr(self, "mask_alpha", 0.2)   # alpha
+                    cam_features = cam_features * (1.0 + alpha * mask_resized) # 加权融合，增强目标区域特征
+                
+                    # from lerobot.debug_tools.img_batch_save import save_img_list
+                    # save_img_list(img, "testimg/img")
+                    # save_img_list(imgs_for_yolo, "testimg/imgs_for_yolo")
+                    # save_img_list(yolo_mask, "testimg/yolo_mask")
+                    # save_img_list(mask_resized, "testimg/mask_resized")
+
+                # 投影features到指定维度
+                cam_features = self.encoder_img_feat_input_proj(cam_features)    # [8, 512, 15, 20] -> [8, 512, 15, 20]
+
+
+                # 重新排列features形状
                 cam_features = einops.rearrange(cam_features, "b c h w -> (h w) b c")
                 cam_pos_embed = einops.rearrange(cam_pos_embed, "b c h w -> (h w) b c")
 

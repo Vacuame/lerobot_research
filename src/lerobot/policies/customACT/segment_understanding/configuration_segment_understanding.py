@@ -6,14 +6,14 @@ from dataclasses import dataclass,field
 #TODO num_classes和output_dim改为动态获取，不记在配置里
 @dataclass
 class SegmentUnderstandingConfig:
-    # YOLO 模型路径（用于离线加载或参考）
+    # YOLO 
     yolo_path: str = "runs/segment/grab_block/weights/best.pt"
     tracker_path: str = "custom/scripts/yolo/botsort.yaml"
     camera_name: str = "robot1"
     max_yolo_objects: int = 20  # YOLO 检测的最大物体数
     num_classes: int = 4  # YOLO 类别数（动态赋值）
 
-    # FK 用的配置
+    # FK
     urdf_path = "custom/config/SO101/so101_new_calib.urdf"
     ee_frame_name = "gripper_frame_link"
 

@@ -13,13 +13,7 @@ class YoloDataProcessor:
         self.ee_anchor = torch.tensor([0.5, 1.0],device=device)  # 末端锚点位置
 
     @torch.no_grad() # 使用YOLO时不计算梯度
-    def get_yolo_data(self, frames):
-        """
-        frames: single image or list of images
-        return:
-            R:      [B, N_max, r_dim]
-            R_mask: [B, N_max]
-        """
+    def get_yolo_results(self,frames):
         # results = self.yolo.track(
         #     source=frames,
         #     persist=True,
@@ -28,15 +22,25 @@ class YoloDataProcessor:
         #     iou=0.7,
         #     tracker=self.config.tracker_path,
         # )
-        
-        # results 是一个 list，长度 = batch_size
-        results = self.yolo.predict(
+        return self.yolo.predict(
             source=frames,
             verbose=False,
             conf=0.25,
             iou=0.7,
             device = self.device,
         )
+
+    @torch.no_grad() # 使用YOLO时不计算梯度
+    def get_yolo_data(self, frames):
+        """
+        frames: single image or list of images
+        return:
+            R:      [B, N_max, r_dim]
+            R_mask: [B, N_max]
+        """
+       
+        # results 是一个 list，长度 = batch_size
+        results = self.get_yolo_results(frames)
 
         #DEBUG 打印结果
         # for r in results:
