@@ -8,6 +8,17 @@ import torch
 from torch import Tensor, nn
 
 
+def _empty_detection_result() -> dict[str, Any]:
+    return {
+        "detected": False,
+        "conf": 0.0,
+        "bbox": None,
+        "area_ratio": 0.0,
+        "border_score": 0.0,
+        "score": 0.0,
+    }
+
+
 def _to_numpy_hwc_image(image: np.ndarray | Tensor) -> np.ndarray:
     """Convert a single image to an HWC uint8 numpy array for detector inference."""
     if isinstance(image, Tensor):
@@ -35,6 +46,23 @@ def _to_numpy_hwc_image(image: np.ndarray | Tensor) -> np.ndarray:
     return image.astype(np.uint8)
 
 
+def _to_numpy_hwc_batch(images: Sequence[np.ndarray | Tensor] | np.ndarray | Tensor) -> list[np.ndarray]:
+    if isinstance(images, Tensor):
+        if images.ndim == 3:
+            return [_to_numpy_hwc_image(images)]
+        if images.ndim == 4:
+            return [_to_numpy_hwc_image(image) for image in images]
+    elif isinstance(images, np.ndarray):
+        if images.ndim == 3:
+            return [_to_numpy_hwc_image(images)]
+        if images.ndim == 4:
+            return [_to_numpy_hwc_image(images[idx]) for idx in range(images.shape[0])]
+    elif isinstance(images, Sequence) and not isinstance(images, (str, bytes)):
+        return [_to_numpy_hwc_image(image) for image in images]
+
+    raise ValueError("Images must be a single image, a batched tensor/array, or a sequence of images.")
+
+
 def _run_detector_single_image(detector: Any, image: np.ndarray) -> Any:
     if detector is None:
         return None
@@ -50,6 +78,25 @@ def _run_detector_single_image(detector: Any, image: np.ndarray) -> Any:
             return detector(image, verbose=False)
         except TypeError:
             return detector(image)
+
+    raise TypeError("detector must be None, callable, or expose a predict(...) method.")
+
+
+def _run_detector_batch(detector: Any, images: list[np.ndarray]) -> Any:
+    if detector is None:
+        return None
+
+    if hasattr(detector, "predict"):
+        try:
+            return detector.predict(source=images, verbose=False)
+        except TypeError:
+            return detector.predict(images)
+
+    if callable(detector):
+        try:
+            return detector(images, verbose=False)
+        except TypeError:
+            return detector(images)
 
     raise TypeError("detector must be None, callable, or expose a predict(...) method.")
 
@@ -128,37 +175,14 @@ def _extract_candidate_detections(result: Any, detector: Any) -> list[dict[str, 
     return []
 
 
-def detect_block_and_score(
-    image: np.ndarray | Tensor,
-    detector: Any,
+def _build_detection_result_from_candidates(
+    candidates: list[dict[str, Any]],
+    image_shape: tuple[int, int],
     target_class_name: str = "block",
     edge_thresh: int = 10,
 ) -> dict[str, Any]:
-    """
-    Detect the highest-confidence target object in one view and convert it into a visibility score.
-    """
-    image_np = _to_numpy_hwc_image(image)
-    height, width = image_np.shape[:2]
+    height, width = image_shape
     image_area = max(height * width, 1)
-
-    empty_result = {
-        "detected": False,
-        "conf": 0.0,
-        "bbox": None,
-        "area_ratio": 0.0,
-        "border_score": 0.0,
-        "score": 0.0,
-    }
-
-    if detector is None:
-        return empty_result
-
-    try:
-        detector_output = _run_detector_single_image(detector, image_np)
-        candidates = _extract_candidate_detections(detector_output, detector)
-    except Exception:
-        return empty_result
-
     target_class_name = target_class_name.lower()
     target_candidates = [
         candidate
@@ -166,7 +190,7 @@ def detect_block_and_score(
         if str(candidate.get("class_name", "")).lower() == target_class_name
     ]
     if not target_candidates:
-        return empty_result
+        return _empty_detection_result()
 
     best_candidate = max(target_candidates, key=lambda item: item["conf"])
     x1, y1, x2, y2 = best_candidate["bbox"]
@@ -195,6 +219,71 @@ def detect_block_and_score(
         "border_score": border_score,
         "score": float(score),
     }
+
+
+def detect_block_and_score(
+    image: np.ndarray | Tensor,
+    detector: Any,
+    target_class_name: str = "block",
+    edge_thresh: int = 10,
+) -> dict[str, Any]:
+    """
+    Detect the highest-confidence target object in one view and convert it into a visibility score.
+    """
+    image_np = _to_numpy_hwc_image(image)
+    height, width = image_np.shape[:2]
+
+    if detector is None:
+        return _empty_detection_result()
+
+    try:
+        detector_output = _run_detector_single_image(detector, image_np)
+        candidates = _extract_candidate_detections(detector_output, detector)
+    except Exception:
+        return _empty_detection_result()
+
+    return _build_detection_result_from_candidates(
+        candidates=candidates,
+        image_shape=(height, width),
+        target_class_name=target_class_name,
+        edge_thresh=edge_thresh,
+    )
+
+
+def detect_block_and_score_batch(
+    images: Sequence[np.ndarray | Tensor] | np.ndarray | Tensor,
+    detector: Any,
+    target_class_name: str = "block",
+    edge_thresh: int = 10,
+) -> list[dict[str, Any]]:
+    image_batch = _to_numpy_hwc_batch(images)
+    if detector is None:
+        return [_empty_detection_result() for _ in image_batch]
+
+    try:
+        detector_outputs = _run_detector_batch(detector, image_batch)
+    except Exception:
+        return [_empty_detection_result() for _ in image_batch]
+
+    if not isinstance(detector_outputs, (list, tuple)):
+        detector_outputs = [detector_outputs]
+
+    results: list[dict[str, Any]] = []
+    for image_np, detector_output in zip(image_batch, detector_outputs, strict=False):
+        candidates = _extract_candidate_detections(detector_output, detector)
+        results.append(
+            _build_detection_result_from_candidates(
+                candidates=candidates,
+                image_shape=image_np.shape[:2],
+                target_class_name=target_class_name,
+                edge_thresh=edge_thresh,
+            )
+        )
+
+    while len(results) < len(image_batch):
+        results.append(_empty_detection_result())
+
+    return results
 
 
 def compute_view_weights(
@@ -352,23 +441,20 @@ class VisibilityAwareMultiViewFusion(nn.Module):
         robot1_weights: list[float] = []
 
         with torch.no_grad():
+            detection_results = detect_block_and_score_batch(
+                images=[*overall_images, *robot1_images],
+                detector=self.detector,
+                target_class_name=self.target_class_name,
+                edge_thresh=self.edge_thresh,
+            )
+            overall_results = detection_results[:batch_size]
+            robot1_results = detection_results[batch_size:]
+
             for sample_idx in range(batch_size):
-                overall_result = detect_block_and_score(
-                    overall_images[sample_idx],
-                    detector=self.detector,
-                    target_class_name=self.target_class_name,
-                    edge_thresh=self.edge_thresh,
-                )
-                robot1_result = detect_block_and_score(
-                    robot1_images[sample_idx],
-                    detector=self.detector,
-                    target_class_name=self.target_class_name,
-                    edge_thresh=self.edge_thresh,
-                )
+                overall_result = overall_results[sample_idx]
+                robot1_result = robot1_results[sample_idx]
                 weight_result = compute_view_weights(overall_result, robot1_result, eps=self.eps)
 
-                overall_results.append(overall_result)
-                robot1_results.append(robot1_result)
                 overall_weights.append(weight_result["overall_weight"])
                 robot1_weights.append(weight_result["robot1_weight"])
 
