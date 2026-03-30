@@ -178,6 +178,19 @@ class ACTPolicy(PreTrainedPolicy):
         else:
             loss = l1_loss
 
+        visibility_debug_info = self.model.last_visibility_debug_info
+        if visibility_debug_info is not None:
+            loss_dict["overall_score"] = float(visibility_debug_info["overall_score"].float().mean().item())
+            loss_dict["robot1_score"] = float(visibility_debug_info["robot1_score"].float().mean().item())
+            loss_dict["overall_weight"] = float(visibility_debug_info["overall_weight"].float().mean().item())
+            loss_dict["robot1_weight"] = float(visibility_debug_info["robot1_weight"].float().mean().item())
+            loss_dict["overall_detected_ratio"] = float(
+                visibility_debug_info["overall_detected"].float().mean().item()
+            )
+            loss_dict["robot1_detected_ratio"] = float(
+                visibility_debug_info["robot1_detected"].float().mean().item()
+            )
+
         return loss, loss_dict
 
     # 专门给yolo和fk用的预处理器设置函数，它们需要没有经过归一化的数据，然而lerobot传入的batch已经经过归一化了

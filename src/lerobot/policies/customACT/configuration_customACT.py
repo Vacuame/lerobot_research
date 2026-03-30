@@ -107,7 +107,7 @@ class ACTConfig(PreTrainedConfig):
     ho_history_segment_num: int = 4
     ho_history_segment_alpha: float = 0.2
     ho_history_segment_decay: str = 'linear'  # 'exponential' or 'linear' or None
-    # —————————————————————————————————————————————————————————————————————————————————————
+ # —————————————————————————————————————————————————————————————————————————————————————
 
 
 
@@ -115,12 +115,17 @@ class ACTConfig(PreTrainedConfig):
     use_segment_understanding: bool = False
     seg_config: SegmentUnderstandingConfig = field(default_factory=SegmentUnderstandingConfig)
 
+ # —————————————————————————————————————————————————————————————————————————————————————
+
     # Visibility-aware dual-view fusion for `overall` and `robot1`.
     use_visibility_aware_fusion: bool = True
+    visibility_yolo_path: str = "runs/segment/grab_block/weights/best.pt"
     visibility_fusion_mode: str = "weighted_concat"
     visibility_target_class_name: str = "block"
     visibility_edge_thresh: int = 10
     visibility_fusion_eps: float = 1e-6
+
+ # —————————————————————————————————————————————————————————————————————————————————————
 
     # Input / output structure.
     n_obs_steps: int = 1

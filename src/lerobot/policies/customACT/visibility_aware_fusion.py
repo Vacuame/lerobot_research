@@ -286,7 +286,7 @@ class VisibilityAwareMultiViewFusion(nn.Module):
         eps: float = 1e-6,
     ):
         super().__init__()
-        self.detector = detector
+        object.__setattr__(self, "_detector", detector)
         self.target_class_name = target_class_name
         self.edge_thresh = edge_thresh
         self.eps = eps
@@ -297,7 +297,11 @@ class VisibilityAwareMultiViewFusion(nn.Module):
         )
 
     def set_detector(self, detector: Any) -> None:
-        self.detector = detector
+        object.__setattr__(self, "_detector", detector)
+
+    @property
+    def detector(self) -> Any:
+        return getattr(self, "_detector", None)
 
     def _split_batch_images(self, images: np.ndarray | Tensor | Sequence[Any]) -> tuple[list[Any], bool]:
         if isinstance(images, Tensor):

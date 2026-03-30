@@ -23,6 +23,7 @@ import torch
 from accelerate import Accelerator
 from termcolor import colored
 from torch.optim import Optimizer
+from ultralytics import YOLO
 
 from lerobot.configs import parser
 from lerobot.configs.train import TrainPipelineConfig
@@ -330,8 +331,16 @@ def train(cfg: TrainPipelineConfig, accelerator: Accelerator | None = None):
         logging.info("Start offline training on a fixed dataset")
 
     # 如果用到了实例分割模块，将预处理传入customACT
-    if isinstance(policy, customACT) and isinstance(policy.config, customACTConfig) and policy.config.use_segment_understanding:
-        policy.set_preprocessor(preprocessor)
+    if isinstance(policy, customACT) and isinstance(policy.config, customACTConfig):
+        needs_preprocessor = policy.config.use_segment_understanding or policy.config.use_visibility_aware_fusion
+        if needs_preprocessor:
+            policy.set_preprocessor(preprocessor)
+
+        if policy.config.use_visibility_aware_fusion:
+            visibility_detector_path = policy.config.visibility_yolo_path
+            if is_main_process:
+                logging.info(f"Loading visibility detector from: {visibility_detector_path}")
+            policy.set_visibility_detector(YOLO(visibility_detector_path))
 
     for _ in range(step, cfg.steps):    # 开始循环
         start_time = time.perf_counter()
@@ -348,6 +357,23 @@ def train(cfg: TrainPipelineConfig, accelerator: Accelerator | None = None):
             accelerator=accelerator,
             lr_scheduler=lr_scheduler,
         )
+
+        if (
+            is_main_process
+            and output_dict
+            and "overall_weight" in output_dict
+            and "robot1_weight" in output_dict
+        ):
+            logging.info(
+                "Visibility step %d | overall_weight=%.4f robot1_weight=%.4f | overall_score=%.4f robot1_score=%.4f | overall_detected_ratio=%.2f robot1_detected_ratio=%.2f",
+                step + 1,
+                output_dict["overall_weight"],
+                output_dict["robot1_weight"],
+                output_dict.get("overall_score", 0.0),
+                output_dict.get("robot1_score", 0.0),
+                output_dict.get("overall_detected_ratio", 0.0),
+                output_dict.get("robot1_detected_ratio", 0.0),
+            )
 
         # Note: eval and checkpoint happens *after* the `step`th training update has completed, so we
         # increment `step` here.
