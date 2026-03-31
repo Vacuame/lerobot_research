@@ -618,10 +618,10 @@ class ACT(nn.Module):
 
                     # 用mask处理feature
                     mask_resized = torch.clamp(mask_resized, 0.0, 1.0) # 确保mask值在合理范围内
-                    alpha = getattr(self, "mask_alpha", 0.2)   # alpha
+                    alpha = self.config.mw_config.alpha   # alpha
                     cam_features = cam_features * (1.0 + alpha * mask_resized) # 加权融合，增强目标区域特征
                 
-                    # from lerobot.debug_tools.img_batch_save import save_img_list
+                    # from lerobot.debug_tools.img_batch_save import save_im5g_list
                     # save_img_list(img, "testimg/img")
                     # save_img_list(imgs_for_yolo, "testimg/imgs_for_yolo")
                     # save_img_list(yolo_mask, "testimg/yolo_mask")

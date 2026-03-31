@@ -20,6 +20,7 @@ from lerobot.configs.types import NormalizationMode
 from lerobot.optim.optimizers import AdamWConfig
 from lerobot.policies.customACT.history_obs_state.configuration_history_obs import HistoryObsConfig, HistoryLSTMConfig, HistoryConv1dConfig
 from lerobot.policies.customACT.segment_understanding.configuration_segment_understanding import SegmentUnderstandingConfig
+from lerobot.policies.customACT.mask_weight.configuration_mask_weight import MaskWeightConfig
 
 @PreTrainedConfig.register_subclass("customACT")
 @dataclass
@@ -114,6 +115,7 @@ class ACTConfig(PreTrainedConfig):
 
     # YOLO mask
     use_mask_weight: bool = True
+    mw_config:MaskWeightConfig = field(default_factory=MaskWeightConfig)
 
     # Input / output structure.
     n_obs_steps: int = 1
