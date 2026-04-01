@@ -118,4 +118,68 @@ class YoloDataProcessor:
 
         return R.to(device), R_mask.to(device)
 
-    
+    @staticmethod
+    def _tensor_to_uint8_hwc(frame: torch.Tensor) -> np.ndarray:
+        """Convert CHW torch image in [0,1] to HWC uint8."""
+        frame = frame.detach().to("cpu")
+        if frame.ndim != 3:
+            raise ValueError(f"Expected CHW image tensor, got shape={tuple(frame.shape)}")
+        frame = frame.clamp(0, 1)
+        frame = (frame * 255.0).to(torch.uint8)
+        return frame.permute(1, 2, 0).numpy()
+
+    def draw_results_on_frame(self, frame: np.ndarray, result) -> np.ndarray:
+        """
+        Draw masks/boxes on one RGB frame using one Ultralytics result.
+        This mirrors custom/scripts/yolo/yolo_test.py::draw_results_on_frame.
+        """
+        out = frame.copy()
+        h, w = out.shape[:2]
+
+        if result is None or result.boxes is None or len(result.boxes) == 0:
+            return out
+
+        boxes = result.boxes.xyxy.detach().to("cpu").numpy().astype(int)
+        classes = result.boxes.cls.detach().to("cpu").numpy().astype(int)
+        confs = result.boxes.conf.detach().to("cpu").numpy()
+        track_ids = None if result.boxes.id is None else result.boxes.id.detach().to("cpu").numpy().astype(int)
+        names = result.names if hasattr(result, "names") else {}
+
+        if result.masks is not None:
+            masks = result.masks.data.detach().to("cpu").numpy()
+            for i, mask in enumerate(masks):
+                if i >= len(boxes):
+                    break
+                mask = cv2.resize(mask, (w, h))
+                mask = (mask > 0.5).astype(np.uint8)
+
+                color = np.zeros_like(out)
+                color[:, :, 1] = mask * 255
+                out = cv2.addWeighted(out, 1.0, color, 0.4, 0)
+
+        for i, (x1, y1, x2, y2) in enumerate(boxes):
+            cls_id = classes[i] if i < len(classes) else -1
+            conf = confs[i] if i < len(confs) else 0.0
+            cls_name = names.get(cls_id, str(cls_id)) if isinstance(names, dict) else str(cls_id)
+            id_text = f"id:{track_ids[i]}, " if track_ids is not None and i < len(track_ids) else ""
+            label = f"{id_text}{cls_name}, {conf:.2f}"
+
+            cv2.rectangle(out, (x1, y1), (x2, y2), (0, 255, 0), 2)
+            cv2.putText(
+                out,
+                label,
+                (x1, max(0, y1 - 8)),
+                cv2.FONT_HERSHEY_SIMPLEX,
+                0.6,
+                (0, 255, 0),
+                2,
+            )
+
+        return out
+
+    def make_debug_overlay_chw(self, frame: torch.Tensor, result) -> np.ndarray:
+        """Create CHW uint8 image for rerun logging."""
+        frame_hwc = self._tensor_to_uint8_hwc(frame)
+        overlay_hwc = self.draw_results_on_frame(frame_hwc, result)
+        print("Make Debug Img")
+        return np.transpose(overlay_hwc, (2, 0, 1))

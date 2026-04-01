@@ -387,7 +387,13 @@ def record_loop(    # 录制循环
             dataset.add_frame(frame)
 
         if display_data:
-            log_rerun_data(observation=obs_processed, action=action_values)
+            obs_for_display = dict(obs_processed)
+            if policy is not None and hasattr(policy, "get_debug_observation_images"):
+                debug_images = policy.get_debug_observation_images()
+                if debug_images:
+                    obs_for_display.update(debug_images)
+                    print("GetDebugImg")
+            log_rerun_data(observation=obs_for_display, action=action_values)
 
         dt_s = time.perf_counter() - start_loop_t
         busy_wait(1 / fps - dt_s)
@@ -476,6 +482,8 @@ def record(cfg: RecordConfig) -> LeRobotDataset: # 实际开始录制
         isinstance(policy.config, customACTConfig) and 
         (policy.config.use_segment_understanding or policy.config.use_mask_weight)):
         policy.set_preprocessor(preprocessor)
+        if cfg.display_data and hasattr(policy, "enable_debug_visualization"):
+            policy.enable_debug_visualization(True)
 
     robot.connect()
     if teleop is not None:

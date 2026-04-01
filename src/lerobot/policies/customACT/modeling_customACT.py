@@ -76,6 +76,7 @@ class ACTPolicy(PreTrainedPolicy):
         self.config = config
 
         self.model = ACT(config)
+        self.model.enable_debug_visualization = False
 
         if config.temporal_ensemble_coeff is not None:
             self.temporal_ensembler = ACTTemporalEnsembler(config.temporal_ensemble_coeff, config.chunk_size)
@@ -183,6 +184,17 @@ class ACTPolicy(PreTrainedPolicy):
     # 专门给yolo和fk用的预处理器设置函数，它们需要没有经过归一化的数据，然而lerobot传入的batch已经经过归一化了
     def set_preprocessor(self, preprocessor: PolicyProcessorPipeline[dict[str, Any], dict[str, Any]] | None = None,):
         self.model.preprocessor = preprocessor
+
+    def enable_debug_visualization(self, enable: bool = True) -> None:
+        self.model.enable_debug_visualization = enable
+        if not enable:
+            self.model.latest_yolo_debug_overlays = {}
+
+    def get_debug_observation_images(self) -> dict[str, np.ndarray]:
+        overlays = getattr(self.model, "latest_yolo_debug_overlays", None)
+        if not overlays:
+            return {}
+        return overlays
         
 
 class ACTTemporalEnsembler:
@@ -323,6 +335,8 @@ class ACT(nn.Module):
         # The cls token forms parameters of the latent's distribution (like this [*means, *log_variances]).
         super().__init__()
         self.config = config
+        self.enable_debug_visualization = False
+        self.latest_yolo_debug_overlays: dict[str, np.ndarray] = {}
 
         print('------customACT------') # customACT标记
 
@@ -496,6 +510,8 @@ class ACT(nn.Module):
                 "actions must be provided when using the variational objective in training mode."
             )
         batch_size = batch[OBS_IMAGES][0].shape[0] if OBS_IMAGES in batch else batch[OBS_ENV_STATE].shape[0]
+        if self.enable_debug_visualization:
+            self.latest_yolo_debug_overlays = {}
 
         # Prepare the latent for input to the transformer encoder.
         if self.config.use_vae and ACTION in batch and self.training:
@@ -605,6 +621,14 @@ class ACT(nn.Module):
                     imgs_for_yolo = norm_step._apply_transform(img, img_key, FeatureType.VISUAL, inverse=True)
                     yolo_results = self.yolo_data_processer.get_yolo_results(imgs_for_yolo)
                     yolo_mask = yolo_result_to_soft_mask(yolo_results)
+                    if (
+                        self.enable_debug_visualization
+                        and len(yolo_results) > 0
+                    ):
+                        cam_name = img_key.replace(f"{OBS_IMAGES}.", "")
+                        self.latest_yolo_debug_overlays[f"custom.yolo_overlay.{cam_name}"] = (
+                            self.yolo_data_processer.make_debug_overlay_chw(imgs_for_yolo[0], yolo_results[0])
+                        )
 
                     # 处理mask形状
                     target_h, target_w = cam_features.shape[-2:]
