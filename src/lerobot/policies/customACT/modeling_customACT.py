@@ -621,6 +621,8 @@ class ACT(nn.Module):
                     imgs_for_yolo = norm_step._apply_transform(img, img_key, FeatureType.VISUAL, inverse=True)
                     yolo_results = self.yolo_data_processer.get_yolo_results(imgs_for_yolo)
                     yolo_mask = yolo_result_to_soft_mask(yolo_results)
+
+                    # 显示出处理后的图片
                     if (
                         self.enable_debug_visualization
                         and len(yolo_results) > 0
@@ -643,7 +645,8 @@ class ACT(nn.Module):
                     # 用mask处理feature
                     mask_resized = torch.clamp(mask_resized, 0.0, 1.0) # 确保mask值在合理范围内
                     alpha = self.config.mw_config.alpha   # alpha
-                    cam_features = cam_features * (1.0 + alpha * mask_resized) # 加权融合，增强目标区域特征
+                    beta = self.config.mw_config.beta     # beta
+                    cam_features = cam_features * (beta + alpha * mask_resized) # 加权融合，增强目标区域特征
                 
                     # from lerobot.debug_tools.img_batch_save import save_im5g_list
                     # save_img_list(img, "testimg/img")

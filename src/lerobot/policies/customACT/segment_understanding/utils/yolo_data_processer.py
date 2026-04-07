@@ -181,5 +181,4 @@ class YoloDataProcessor:
         """Create CHW uint8 image for rerun logging."""
         frame_hwc = self._tensor_to_uint8_hwc(frame)
         overlay_hwc = self.draw_results_on_frame(frame_hwc, result)
-        print("Make Debug Img")
         return np.transpose(overlay_hwc, (2, 0, 1))

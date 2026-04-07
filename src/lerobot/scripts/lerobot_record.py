@@ -392,7 +392,6 @@ def record_loop(    # 录制循环
                 debug_images = policy.get_debug_observation_images()
                 if debug_images:
                     obs_for_display.update(debug_images)
-                    print("GetDebugImg")
             log_rerun_data(observation=obs_for_display, action=action_values)
 
         dt_s = time.perf_counter() - start_loop_t
