@@ -92,23 +92,67 @@ class ACTConfig(PreTrainedConfig):
     """
  # —————————————————————————————————————————————————————————————————————————————————————
 
-    # 新增：自定义参数
-    n_history_obs_states:int = 32 # 若 = 0 则关闭此功能，填多少帧
-    
-    # 临时config: history_obs -- ho_
-    ho_type:str = 'conv1d'  # 'lstm' or 'conv1d'
+    # 自定义历史信息参数。
+    # 注意：如果你要开关历史模块，建议只改这个配置文件，不要在训练命令里覆盖这些参数。
+
+    # 旧版 history_obs_states 模块的历史帧数。0 表示完全关闭旧模块；>0 表示使用旧的历史状态 token。
+    # 这个旧模块只看 observation.state 历史，不使用 action.history；新实验建议保持 0。
+    n_history_obs_states: int = 0
+
+    # 旧版 history_obs_states 模块类型。"conv1d" 使用一维卷积历史编码；"lstm" 使用 LSTM 历史编码。
+    ho_type: str = 'conv1d'
     # his_obs_config: HistoryObsConfig | None = None
 
-    # lstm params
+    # 旧版 LSTM 历史模块的输入维度。通常应等于 observation.state 的维度。
     ho_input_size: int = 6
+    # 旧版 LSTM 历史模块的隐藏层维度，越大容量越强，但参数和过拟合风险也越高。
     ho_hidden_size: int = 64
+    # 旧版 LSTM 历史模块层数。1 层最轻量，更多层通常需要更多数据。
     ho_num_layers: int = 1
-    # conv1d params
+    # 旧版 Conv1d 历史模块输出多少个历史 token，也就是把历史序列压缩成几段。
     ho_history_segment_num: int = 4
+    # 旧版 Conv1d 分段的非均匀程度。越大越偏向保留靠近当前时刻的细节。
     ho_history_segment_alpha: float = 0.2
-    ho_history_segment_decay: str = 'linear'  # 'exponential' or 'linear' or None
+    # 旧版 Conv1d 分段权重衰减方式。"linear" 线性衰减；"exponential" 指数衰减；None 表示不使用。
+    ho_history_segment_decay: str = 'linear'
+    # 旧版事件先验权重，用于控制运动突变先验在旧 history token pooling 中的影响。
     ho_event_prior_weight: float = 1.0
+    # 旧版历史模块辅助动作预测损失权重。只有 n_history_obs_states > 0 时才会生效。
     ho_aux_loss_weight: float = 0.05
+
+
+
+# —————————————————————————————————————————————————————————————————————————————————————
+    # 是否启用新的“失败感知本体历史 Recovery Token 模块”。
+    # False：完全走原始 ACT 路径，不需要历史 state/action 字段。
+    # True：训练时数据集自动构造 observation.state.history、action.history、history_mask；
+    #       推理时 policy 内部维护 state/action 历史 buffer。
+    use_recovery_history_token: bool = True
+    # Recovery 模块使用的历史窗口长度 H。
+    # state.history = [s_{t-H+1}, ..., s_t]，action.history = [a_{t-H}, ..., a_{t-1}]。
+    history_len: int = 64
+    # 把 H 个历史时刻压缩成多少个 recovery tokens。4 表示输出 [B, 4, dim_model]。
+    # 如果 history_len 不能整除该值，最后一段会自动包含剩余历史帧。
+    history_num_segments: int = 4
+    # Recovery 模块内部因果卷积的隐藏维度。只影响新增历史模块，不改变 ACT 主干 dim_model。
+    history_hidden_dim: int = 256
+    # 因果卷积核大小。3 表示每层卷积最多看当前和左侧两个位置，再由 dilation 扩大感受野。
+    history_conv_kernel_size: int = 3
+    # 多层膨胀因果卷积的 dilation 设置。[1, 2, 4, 8] 能覆盖短期到较长期的历史变化。
+    # 所有卷积都只做左侧 padding，保证不会泄露未来信息。
+    history_conv_dilations: list[int] = field(default_factory=lambda: [1, 2, 4, 8])
+    # Recovery 模块内部 dropout，用于减少小数据集上历史 token 的过拟合。
+    history_dropout: float = 0.1
+    # 是否使用动作-状态执行偏差 exec_error = projected_action - state。
+    # True：让模块显式感知“动作发出后状态没有按预期变化”的失败线索。
+    # False：exec_error 置零，只使用相对位移、速度和加速度。
+    use_action_state_error: bool = True
+    # 历史动作预测辅助损失权重。目标是 batch["action"][:, 0, :]，用于让 recovery token 保留动作相关信息。
+    history_action_loss_weight: float = 0.05
+    # 事件先验对齐辅助损失权重。该损失把 learned event score 弱约束到运动突变先验附近，不使用人工阶段标签。
+    event_prior_loss_weight: float = 0.01
+    # Recovery tokens 的位置编码类型。目前只实现 "learned"，即每个 recovery segment 一个可学习位置向量。
+    recovery_token_pos_embed: str = "learned"
     # —————————————————————————————————————————————————————————————————————————————————————
 
 
@@ -191,6 +235,21 @@ class ACTConfig(PreTrainedConfig):
             raise ValueError(
                 f"Multiple observation steps not handled yet. Got `nobs_steps={self.n_obs_steps}`"
             )
+        if self.use_recovery_history_token:
+            if self.history_len <= 0:
+                raise ValueError("`history_len` must be positive when recovery history token is enabled.")
+            if self.history_num_segments <= 0:
+                raise ValueError("`history_num_segments` must be positive.")
+            if self.history_len < self.history_num_segments:
+                raise ValueError("`history_len` must be >= `history_num_segments`.")
+            if self.history_hidden_dim <= 0:
+                raise ValueError("`history_hidden_dim` must be positive.")
+            if self.history_conv_kernel_size <= 0:
+                raise ValueError("`history_conv_kernel_size` must be positive.")
+            if not self.history_conv_dilations:
+                raise ValueError("`history_conv_dilations` cannot be empty.")
+            if self.recovery_token_pos_embed != "learned":
+                raise ValueError("Only `recovery_token_pos_embed='learned'` is currently supported.")
 
     def get_optimizer_preset(self) -> AdamWConfig:
         return AdamWConfig(
@@ -233,6 +292,14 @@ class ACTConfig(PreTrainedConfig):
     @property
     def history_obs_state_delta_indices(self) -> list: # -steps+1...-2,-1,0  [-steps+1, 1)
         return list(range(-self.n_history_obs_states+1, 1)) if( self.n_history_obs_states > 0 ) else None 
+
+    @property
+    def recovery_state_history_delta_indices(self) -> list | None:
+        return list(range(-self.history_len + 1, 1)) if self.use_recovery_history_token else None
+
+    @property
+    def recovery_action_history_delta_indices(self) -> list | None:
+        return list(range(-self.history_len, 0)) if self.use_recovery_history_token else None
 
     @property
     def reward_delta_indices(self) -> None:

@@ -36,9 +36,19 @@ from lerobot.policies.dino_act.dino_backbone import DinoV2Backbone
 
 from lerobot.policies.customACT.configuration_customACT import ACTConfig
 from lerobot.policies.pretrained import PreTrainedPolicy
-from lerobot.utils.constants import ACTION, OBS_ENV_STATE, OBS_IMAGES, OBS_STATE, HIS_OBS_STATES
+from lerobot.utils.constants import (
+    ACTION,
+    ACTION_HISTORY,
+    HISTORY_MASK,
+    HIS_OBS_STATES,
+    OBS_ENV_STATE,
+    OBS_IMAGES,
+    OBS_STATE,
+    OBS_STATE_HISTORY,
+)
 #新增：自己的import
 from lerobot.policies.customACT.history_obs_state.modeling_history_obs import HistoryObsStateEmbedding
+from lerobot.policies.customACT.history_obs_state.embedding_conv1d_history_obs import RecoveryHistoryTokenEncoder
 from lerobot.policies.dino_act.backbone_res import ResNet18Backbone, get_custom_backbone
 from lerobot.policies.dino_act.convnext import ConvNeXtBackbone
 from lerobot.policies.dino_act.convnext_frame import ConvNeXtBackbone1
@@ -108,6 +118,113 @@ class ACTPolicy(PreTrainedPolicy):
             self.temporal_ensembler.reset()
         else:
             self._action_queue = deque([], maxlen=self.config.n_action_steps)
+        if self.config.use_recovery_history_token:
+            self._recovery_state_buffer = deque([], maxlen=self.config.history_len)
+            self._recovery_action_buffer = deque([], maxlen=self.config.history_len)
+
+    def _record_recovery_state(self, batch: dict[str, Tensor]) -> None:
+        """Record the current normalized proprioceptive state for online inference.
+
+        During training, the dataloader provides ``observation.state.history`` directly.
+        During real robot rollout, there is no dataloader window, so the policy keeps a
+        small FIFO buffer here. The stored tensor is [state_dim] and is already normalized
+        by the policy preprocessor, matching the training-time state history scale.
+        """
+        if not self.config.use_recovery_history_token or OBS_STATE_HISTORY in batch:
+            return
+        state = batch[OBS_STATE].detach()
+        if state.ndim == 1:
+            state = state.unsqueeze(0)
+        assert state.shape[0] == 1, "Online recovery history buffer currently supports batch size 1."
+        self._recovery_state_buffer.append(state[0])
+
+    def _record_recovery_action(self, action: Tensor) -> None:
+        """Record the normalized action selected at this control step.
+
+        The recovery encoder expects ``action.history = [a_{t-H}, ..., a_{t-1}]``.
+        We therefore append the action only after it has been selected from the chunk or
+        temporal ensemble. This keeps the next model call causal: it can see actions that
+        were already issued, but never future actions from the current predicted chunk.
+        """
+        if not self.config.use_recovery_history_token:
+            return
+        action = action.detach()
+        if action.ndim == 1:
+            action = action.unsqueeze(0)
+        assert action.shape[0] == 1, "Online recovery action buffer currently supports batch size 1."
+        self._recovery_action_buffer.append(action[0])
+
+    def _left_pad_history(
+        self,
+        values: list[Tensor],
+        *,
+        target_len: int,
+        pad_value: Tensor,
+    ) -> tuple[Tensor, Tensor]:
+        """Convert a variable-length FIFO buffer into a fixed history tensor.
+
+        Args:
+            values: Recent tensors, each with shape [D]. Newer elements are at the end.
+            target_len: Desired history length H.
+            pad_value: [1, D] tensor used for missing early-episode positions.
+
+        Returns:
+            padded: [H, D], left padded so the newest value is at index H - 1.
+            mask: [H], True only where the entry came from real rollout history.
+        """
+        values = values[-target_len:]
+        valid_len = len(values)
+        if valid_len == 0:
+            padded = pad_value.repeat(target_len, 1)
+        else:
+            pad = pad_value.repeat(target_len - valid_len, 1)
+            padded = torch.cat([pad, torch.stack(values, dim=0)], dim=0)
+        mask = torch.zeros(target_len, dtype=torch.bool, device=pad_value.device)
+        if valid_len > 0:
+            mask[-valid_len:] = True
+        return padded, mask
+
+    def _add_recovery_history_to_batch(self, batch: dict[str, Tensor]) -> dict[str, Tensor]:
+        """Attach recovery history fields to an online inference batch.
+
+        Training batches get these fields from dataset delta timestamps. In deployment,
+        this method builds:
+          - observation.state.history: [1, H, state_dim]
+          - action.history: [1, H, action_dim]
+          - history_mask: [1, H]
+
+        The mask requires both a real state and a real previous action at the same history
+        position, so the first few control steps do not pretend that padded actions are
+        valid evidence.
+        """
+        if not self.config.use_recovery_history_token or OBS_STATE_HISTORY in batch:
+            return batch
+        if len(self._recovery_state_buffer) == 0:
+            self._record_recovery_state(batch)
+
+        batch = dict(batch)
+        current_state = batch[OBS_STATE]
+        if current_state.ndim == 1:
+            current_state = current_state.unsqueeze(0)
+        assert current_state.shape[0] == 1, "Online recovery history buffer currently supports batch size 1."
+
+        state_pad_value = self._recovery_state_buffer[0].view(1, -1).to(current_state.device)
+        action_dim = self.config.action_feature.shape[0]
+        action_pad_value = torch.zeros(1, action_dim, dtype=current_state.dtype, device=current_state.device)
+
+        state_values = [v.to(current_state.device, dtype=current_state.dtype) for v in self._recovery_state_buffer]
+        action_values = [v.to(current_state.device, dtype=current_state.dtype) for v in self._recovery_action_buffer]
+        state_history, state_mask = self._left_pad_history(
+            state_values, target_len=self.config.history_len, pad_value=state_pad_value
+        )
+        action_history, action_mask = self._left_pad_history(
+            action_values, target_len=self.config.history_len, pad_value=action_pad_value
+        )
+
+        batch[OBS_STATE_HISTORY] = state_history.unsqueeze(0)
+        batch[ACTION_HISTORY] = action_history.unsqueeze(0)
+        batch[HISTORY_MASK] = (state_mask & action_mask).unsqueeze(0)
+        return batch
 
     @torch.no_grad()
     def select_action(self, batch: dict[str, Tensor]) -> Tensor:
@@ -119,10 +236,12 @@ class ACTPolicy(PreTrainedPolicy):
         queue is empty.
         """
         self.eval()  # keeping the policy in eval mode as it could be set to train mode while queue is consumed
+        self._record_recovery_state(batch)
 
         if self.config.temporal_ensemble_coeff is not None:
             actions = self.predict_action_chunk(batch)
             action = self.temporal_ensembler.update(actions)
+            self._record_recovery_action(action)
             return action
 
         # Action queue logic for n_action_steps > 1. When the action_queue is depleted, populate it by
@@ -133,7 +252,9 @@ class ACTPolicy(PreTrainedPolicy):
             # `self.model.forward` returns a (batch_size, n_action_steps, action_dim) tensor, but the queue
             # effectively has shape (n_action_steps, batch_size, *), hence the transpose.
             self._action_queue.extend(actions.transpose(0, 1))
-        return self._action_queue.popleft()
+        action = self._action_queue.popleft()
+        self._record_recovery_action(action)
+        return action
 
     @torch.no_grad()
     def predict_action_chunk(self, batch: dict[str, Tensor]) -> Tensor: # 实际运行时的100步动作预测
@@ -143,6 +264,7 @@ class ACTPolicy(PreTrainedPolicy):
         if self.config.image_features:
             batch = dict(batch)  # shallow copy so that adding a key doesn't modify the original
             batch[OBS_IMAGES] = [batch[key] for key in self.config.image_features]
+        batch = self._add_recovery_history_to_batch(batch)
 
         actions = self.model(batch)[0]
         return actions
@@ -190,6 +312,49 @@ class ACTPolicy(PreTrainedPolicy):
             loss = loss + self.config.ho_aux_loss_weight * history_aux_action_loss
             loss_dict["history_aux_action_loss"] = history_aux_action_loss.item()
             loss_dict["history_aux_loss_weight"] = self.config.ho_aux_loss_weight
+
+        recovery_aux_outputs = getattr(self.model, "recovery_aux_outputs", None)
+        if self.config.use_recovery_history_token and recovery_aux_outputs is not None:
+            # Auxiliary target 1: from the recovery tokens alone, predict the first action
+            # in the supervised ACT chunk, i.e. batch["action"][:, 0, :].
+            first_action_mask = (~batch["action_is_pad"][:, 0]).unsqueeze(-1).to(dtype=batch[ACTION].dtype)
+            hist_action_loss = (
+                F.mse_loss(
+                    recovery_aux_outputs["hist_action_pred"],
+                    batch[ACTION][:, 0],
+                    reduction="none",
+                )
+                * first_action_mask
+            ).mean()
+
+            # Auxiliary target 2: keep the learned event score weakly aligned with a
+            # no-label motion-change prior. This does not introduce manual phase labels;
+            # it only says that large velocity/acceleration/execution-error moments are
+            # plausible recovery-relevant events.
+            history_mask = batch[HISTORY_MASK].to(dtype=torch.bool)
+            valid = history_mask.to(dtype=batch[ACTION].dtype)
+            event_prior = recovery_aux_outputs["event_prior"]
+            event_scores = recovery_aux_outputs["event_scores"]
+            denom = valid.sum(dim=1, keepdim=True).clamp_min(1.0)
+            prior_mean = (event_prior * valid).sum(dim=1, keepdim=True) / denom
+            prior_var = (((event_prior - prior_mean) * valid) ** 2).sum(dim=1, keepdim=True) / denom
+            normalized_prior = (event_prior - prior_mean) / (prior_var.sqrt() + 1e-6)
+            event_prior_loss = (
+                (torch.sigmoid(event_scores) - torch.sigmoid(normalized_prior)).pow(2) * valid
+            ).sum() / valid.sum().clamp_min(1.0)
+
+            loss = (
+                loss
+                + self.config.history_action_loss_weight * hist_action_loss
+                + self.config.event_prior_loss_weight * event_prior_loss
+            )
+            loss_dict["hist_action_loss"] = hist_action_loss.item()
+            loss_dict["event_prior_loss"] = event_prior_loss.item()
+            loss_dict["recovery_score_mean"] = recovery_aux_outputs["recovery_score"].mean().item()
+            if history_mask.any():
+                loss_dict["event_score_mean"] = event_scores[history_mask].mean().item()
+            else:
+                loss_dict["event_score_mean"] = 0.0
 
         return loss, loss_dict
 
@@ -438,6 +603,24 @@ class ACT(nn.Module):
             self.history_obs_state_embedding = HistoryObsStateEmbedding(config)
             self.history_aux_action_head = nn.Linear(config.dim_model, self.config.action_feature.shape[0])
             self.history_aux_action_hat = None
+
+        if self.config.use_recovery_history_token:
+            self.recovery_history_encoder = RecoveryHistoryTokenEncoder(
+                state_dim=self.config.robot_state_feature.shape[0],
+                action_dim=self.config.action_feature.shape[0],
+                dim_model=config.dim_model,
+                history_len=config.history_len,
+                history_num_segments=config.history_num_segments,
+                history_hidden_dim=config.history_hidden_dim,
+                history_conv_kernel_size=config.history_conv_kernel_size,
+                history_conv_dilations=config.history_conv_dilations,
+                history_dropout=config.history_dropout,
+                use_action_state_error=config.use_action_state_error,
+            )
+            self.recovery_token_pos_embed = nn.Parameter(
+                torch.zeros(config.history_num_segments, config.dim_model)
+            )
+            self.recovery_aux_outputs = None
         
 
 
@@ -548,6 +731,9 @@ class ACT(nn.Module):
     # 实际执行动作预测的位置
     def forward(self, batch: dict[str, Tensor]) -> tuple[Tensor, tuple[Tensor, Tensor] | tuple[None, None]]:
 
+        if self.config.use_recovery_history_token:
+            self.recovery_aux_outputs = None
+
         if self.config.use_vae and self.training:
             assert ACTION in batch, (
                 "actions must be provided when using the variational objective in training mode."
@@ -626,6 +812,7 @@ class ACT(nn.Module):
             # print(f"encoder_in_tokens length before adding history_obs_state_embed: {len(encoder_in_tokens)}") # debug 输出添加历史观测状态embedding前encoder_in_tokens的长度:2
             history_obs_state_embed = history_obs_state_embed.permute(1, 0, 2)  # (N, B, D)
             encoder_in_tokens.extend(list(history_obs_state_embed))
+
             # print(f"encoder_in_tokens length after adding history_obs_state_embed: {len(encoder_in_tokens)}") # debug 输出添加历史观测状态embedding后encoder_in_tokens的长度:6
 
 
@@ -646,6 +833,20 @@ class ACT(nn.Module):
             segment_understanding_embed = self.segment_understanding_embedding(yolo_r, yolo_mask , ee_pose) #(B, D)
             # 最后把embedding放入tokens
             encoder_in_tokens.append(segment_understanding_embed)
+
+        if self.config.use_recovery_history_token:
+            missing = [key for key in (OBS_STATE_HISTORY, ACTION_HISTORY, HISTORY_MASK) if key not in batch]
+            if missing:
+                raise KeyError(f"Missing recovery history batch keys: {missing}")
+            recovery_tokens, self.recovery_aux_outputs = self.recovery_history_encoder(
+                state_history=batch[OBS_STATE_HISTORY],
+                action_history=batch[ACTION_HISTORY],
+                current_state=batch[OBS_STATE],
+                history_mask=batch[HISTORY_MASK],
+            )
+            recovery_tokens = recovery_tokens.permute(1, 0, 2)  # [history_num_segments, B, D]
+            encoder_in_tokens.extend(list(recovery_tokens))
+            encoder_in_pos_embed.extend(list(self.recovery_token_pos_embed.unsqueeze(1)))
 
         if self.config.image_features:
             # For a list of images, the H and W may vary but H*W is constant.

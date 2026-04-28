@@ -34,7 +34,7 @@ from huggingface_hub.errors import RevisionNotFoundError
 
 from lerobot.datasets.compute_stats import aggregate_stats, compute_episode_stats
 from lerobot.datasets.image_writer import AsyncImageWriter, write_image
-from lerobot.utils.constants import OBS_STATE, HIS_OBS_STATES
+from lerobot.utils.constants import ACTION, ACTION_HISTORY, HISTORY_MASK, HIS_OBS_STATES, OBS_STATE, OBS_STATE_HISTORY
 from lerobot.datasets.utils import (
     DEFAULT_EPISODES_PATH,
     DEFAULT_FEATURES,
@@ -974,6 +974,10 @@ class LeRobotDataset(torch.utils.data.Dataset):
             dataset_key = key
             if key == HIS_OBS_STATES:
                 dataset_key = OBS_STATE
+            elif key == OBS_STATE_HISTORY:
+                dataset_key = OBS_STATE
+            elif key == ACTION_HISTORY:
+                dataset_key = ACTION
             res[key] = torch.stack(self.hf_dataset[q_idx][dataset_key])
         return res
 
@@ -1024,6 +1028,16 @@ class LeRobotDataset(torch.utils.data.Dataset):
             item = {**item, **padding}
             for key, val in query_result.items():
                 item[key] = val
+            if OBS_STATE_HISTORY in item and ACTION_HISTORY in item:
+                state_pad = item.get(f"{OBS_STATE_HISTORY}_is_pad")
+                action_pad = item.get(f"{ACTION_HISTORY}_is_pad")
+                if state_pad is not None and action_pad is not None:
+                    # Valid recovery history positions must have both a real state and a real previous action.
+                    # This prevents clamped/padded action indices at episode starts from leaking into history.
+                    history_mask = ~(state_pad | action_pad)
+                    item[HISTORY_MASK] = history_mask
+                    item[ACTION_HISTORY] = item[ACTION_HISTORY].clone()
+                    item[ACTION_HISTORY][action_pad] = 0
 
         if len(self.meta.video_keys) > 0:
             current_ts = item["timestamp"].item()

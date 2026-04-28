@@ -26,7 +26,7 @@ from torch import Tensor
 
 from lerobot.configs.types import FeatureType, NormalizationMode, PipelineFeatureType, PolicyFeature
 from lerobot.datasets.lerobot_dataset import LeRobotDataset
-from lerobot.utils.constants import ACTION
+from lerobot.utils.constants import ACTION, ACTION_HISTORY, OBS_STATE, OBS_STATE_HISTORY
 
 from .converters import from_tensor_to_numpy, to_tensor
 from .core import EnvTransition, PolicyAction, TransitionKey
@@ -258,6 +258,11 @@ class _NormalizationMixin:
                 # Convert to tensor but preserve original dtype for adaptation logic
                 tensor = torch.as_tensor(new_observation[key])
                 new_observation[key] = self._apply_transform(tensor, key, feature.type, inverse=inverse)
+        if OBS_STATE_HISTORY in new_observation and OBS_STATE in self._tensor_stats:
+            tensor = torch.as_tensor(new_observation[OBS_STATE_HISTORY])
+            new_observation[OBS_STATE_HISTORY] = self._apply_transform(
+                tensor, OBS_STATE, FeatureType.STATE, inverse=inverse
+            )
         return new_observation
 
     def _normalize_action(self, action: Tensor, inverse: bool) -> Tensor:
@@ -479,6 +484,16 @@ class NormalizerProcessorStep(_NormalizationMixin, ProcessorStep):
             raise ValueError(f"Action should be a PolicyAction type got {type(action)}")
 
         new_transition[TransitionKey.ACTION] = self._normalize_action(action, inverse=False)
+        complementary_data = new_transition.get(TransitionKey.COMPLEMENTARY_DATA)
+        if isinstance(complementary_data, dict) and ACTION_HISTORY in complementary_data:
+            complementary_data = dict(complementary_data)
+            complementary_data[ACTION_HISTORY] = self._apply_transform(
+                torch.as_tensor(complementary_data[ACTION_HISTORY]),
+                ACTION,
+                FeatureType.ACTION,
+                inverse=False,
+            )
+            new_transition[TransitionKey.COMPLEMENTARY_DATA] = complementary_data
 
         return new_transition
 

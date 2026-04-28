@@ -28,7 +28,15 @@ from lerobot.datasets.lerobot_dataset import (
 )
 from lerobot.datasets.streaming_dataset import StreamingLeRobotDataset
 from lerobot.datasets.transforms import ImageTransforms
-from lerobot.utils.constants import ACTION, OBS_PREFIX, REWARD, OBS_STATE, HIS_OBS_STATES
+from lerobot.utils.constants import (
+    ACTION,
+    ACTION_HISTORY,
+    HIS_OBS_STATES,
+    OBS_PREFIX,
+    OBS_STATE,
+    OBS_STATE_HISTORY,
+    REWARD,
+)
 from lerobot.policies.customACT.configuration_customACT import ACTConfig as CustomACTConfig
 
 IMAGENET_STATS = {
@@ -67,6 +75,14 @@ def resolve_delta_timestamps(
             customact_cfg = cast(CustomACTConfig, cfg) #问题：为什么在这里/fps转换为时间，之后又*fps转换为帧数？总之先按他的来吧
             if key == OBS_STATE and customact_cfg.history_obs_state_delta_indices is not None:#[-31,0] /30fps = [-1.033s,0s]
                 delta_timestamps[HIS_OBS_STATES] = [i / ds_meta.fps for i in customact_cfg.history_obs_state_delta_indices]
+            if key == OBS_STATE and customact_cfg.recovery_state_history_delta_indices is not None:
+                delta_timestamps[OBS_STATE_HISTORY] = [
+                    i / ds_meta.fps for i in customact_cfg.recovery_state_history_delta_indices
+                ]
+            if key == ACTION and customact_cfg.recovery_action_history_delta_indices is not None:
+                delta_timestamps[ACTION_HISTORY] = [
+                    i / ds_meta.fps for i in customact_cfg.recovery_action_history_delta_indices
+                ]
     
     if len(delta_timestamps) == 0:
         delta_timestamps = None

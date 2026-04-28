@@ -23,7 +23,7 @@ from typing import Any
 import numpy as np
 import torch
 
-from lerobot.utils.constants import ACTION, DONE, OBS_PREFIX, REWARD, TRUNCATED, HIS_OBS_STATES
+from lerobot.utils.constants import ACTION, ACTION_HISTORY, DONE, HISTORY_MASK, OBS_PREFIX, REWARD, TRUNCATED, HIS_OBS_STATES
 
 from .core import EnvTransition, PolicyAction, RobotAction, RobotObservation, TransitionKey
 
@@ -170,8 +170,10 @@ def _extract_complementary_data(batch: dict[str, Any]) -> dict[str, Any]:
     task_key = {"task": batch["task"]} if "task" in batch else {}
     index_key = {"index": batch["index"]} if "index" in batch else {}
     task_index_key = {"task_index": batch["task_index"]} if "task_index" in batch else {}
+    action_history_key = {ACTION_HISTORY: batch[ACTION_HISTORY]} if ACTION_HISTORY in batch else {}
+    history_mask_key = {HISTORY_MASK: batch[HISTORY_MASK]} if HISTORY_MASK in batch else {}
 
-    return {**pad_keys, **task_key, **index_key, **task_index_key}
+    return {**pad_keys, **task_key, **index_key, **task_index_key, **action_history_key, **history_mask_key}
 
 #新增：添加 history_obs_states
 def create_transition(

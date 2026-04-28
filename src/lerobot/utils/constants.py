@@ -27,8 +27,11 @@ OBS_LANGUAGE = OBS_STR + ".language"
 OBS_LANGUAGE_TOKENS = OBS_LANGUAGE + ".tokens"
 OBS_LANGUAGE_ATTENTION_MASK = OBS_LANGUAGE + ".attention_mask"
 HIS_OBS_STATES = "history_obs_states" #新增
+OBS_STATE_HISTORY = OBS_STATE + ".history"
+HISTORY_MASK = "history_mask"
 
 ACTION = "action"
+ACTION_HISTORY = ACTION + ".history"
 REWARD = "next.reward"
 TRUNCATED = "next.truncated"
 DONE = "next.done"
