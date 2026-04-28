@@ -177,6 +177,20 @@ class ACTPolicy(PreTrainedPolicy):
         else:
             loss = l1_loss
 
+        history_aux_action_hat = getattr(self.model, "history_aux_action_hat", None)
+        if (
+            self.config.n_history_obs_states > 0
+            and self.config.ho_aux_loss_weight > 0
+            and history_aux_action_hat is not None
+        ):
+            first_action_mask = (~batch["action_is_pad"][:, 0]).unsqueeze(-1)
+            history_aux_action_loss = (
+                F.l1_loss(batch[ACTION][:, 0], history_aux_action_hat, reduction="none") * first_action_mask
+            ).mean()
+            loss = loss + self.config.ho_aux_loss_weight * history_aux_action_loss
+            loss_dict["history_aux_action_loss"] = history_aux_action_loss.item()
+            loss_dict["history_aux_loss_weight"] = self.config.ho_aux_loss_weight
+
         return loss, loss_dict
 
     # 专门给yolo和fk用的预处理器设置函数，它们需要没有经过归一化的数据，然而lerobot传入的batch已经经过归一化了
@@ -422,6 +436,8 @@ class ACT(nn.Module):
         # 新增：历史动作embedding模块
         if self.config.n_history_obs_states > 0:
             self.history_obs_state_embedding = HistoryObsStateEmbedding(config)
+            self.history_aux_action_head = nn.Linear(config.dim_model, self.config.action_feature.shape[0])
+            self.history_aux_action_hat = None
         
 
 
@@ -605,6 +621,7 @@ class ACT(nn.Module):
         # 新增：调用历史观测状态
         if self.config.n_history_obs_states > 0:
             history_obs_state_embed = self.history_obs_state_embedding(batch[HIS_OBS_STATES])  # (B, D)
+            self.history_aux_action_hat = self.history_aux_action_head(history_obs_state_embed.mean(dim=1))
             # print(f"history_obs_state_embed: {history_obs_state_embed.shape}") # debug 输出历史观测状态embedding的形状
             # print(f"encoder_in_tokens length before adding history_obs_state_embed: {len(encoder_in_tokens)}") # debug 输出添加历史观测状态embedding前encoder_in_tokens的长度:2
             history_obs_state_embed = history_obs_state_embed.permute(1, 0, 2)  # (N, B, D)

@@ -21,6 +21,7 @@ class HistoryConv1dConfig(HistoryObsConfig):
     history_segment_num: int = 3 
     history_segment_alpha: float = 0.5
     history_segment_decay: str = 'linear'  # 'exponential' or 'linear' or None
+    event_prior_weight: float = 1.0
     
 
 

@@ -107,6 +107,8 @@ class ACTConfig(PreTrainedConfig):
     ho_history_segment_num: int = 4
     ho_history_segment_alpha: float = 0.2
     ho_history_segment_decay: str = 'linear'  # 'exponential' or 'linear' or None
+    ho_event_prior_weight: float = 1.0
+    ho_aux_loss_weight: float = 0.05
     # —————————————————————————————————————————————————————————————————————————————————————
 
 
@@ -214,7 +216,8 @@ class ACTConfig(PreTrainedConfig):
             return HistoryConv1dConfig(
                 history_segment_num=self.ho_history_segment_num,
                 history_segment_alpha=self.ho_history_segment_alpha,
-                history_segment_decay=self.ho_history_segment_decay
+                history_segment_decay=self.ho_history_segment_decay,
+                event_prior_weight=self.ho_event_prior_weight
             )
         else:
             raise ValueError(f"Unknown ho_type: {self.ho_type}")
