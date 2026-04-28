@@ -1,0 +1,729 @@
+
+
+===== PAGE 1 =====
+StageACT: Stage-Conditioned Imitation for Robust
+Humanoid Door Opening
+Moonyoung Lee ∗, Dong-Ki Kim, Jai Krishna Bandi, Max Smith, Aileen Liao ∗,
+Ali-akbar Agha-mohammadi, Shayegan Omidshafiei
+FieldAI
+Fig. 1: Autonomous door opening by the G1 humanoid robot in a real-world office. Time-synchronized front (top) and back (bottom) views illustrate the
+full sequence of contact-rich, long-horizon loco-manipulation task: approaching the handle, rotating the latch, pushing the door open, and walking through.
+This demonstration highlights StageACT’s ability to couple locomotion with manipulation and complete the task autonomously without external sensing
+(e.g., AR tags) or privileged door information.
+Abstract— Humanoid robots promise to operate in everyday
+human environments without requiring modifications to the
+surroundings. Among the many skills needed, opening doors
+is essential, as doors are the most common gateways in built
+spaces and often limit where a robot can go. Door opening,
+however, poses unique challenges as it is a long-horizon task
+under partial observability, such as reasoning about the door’s
+unobservable latch state that dictates whether the robot should
+rotate the handle or push the door. This ambiguity makes
+standard behavior cloning prone to mode collapse, yielding
+blended or out-of-sequence actions. We introduceStageACT, a
+stage-conditioned imitation learning framework that augments
+low-level policies with task-stage inputs. This effective addition
+increases robustness to partial observability, leading to higher
+success rates and shorter completion times. On a humanoid
+operating in a real-world office environment,StageACTachieves
+a 55% success rate on previously unseen doors, more than
+doubling the best baseline. Moreover, our method supports in-
+tentional behavior guidance through stage prompting, enabling
+recovery behaviors. These results highlight stage conditioning
+as a lightweight yet powerful mechanism for long-horizon
+humanoid loco-manipulation. A highlight video can be found in:
+https://icradooropen.github.io/icradooropen/.
+∗ML and AL conducted this work during their internships at FieldAI.
+ML is with Carnegie Mellon University, and AL is with University of
+Pennsylvania.
+I. INTRODUCTION
+Humanoid robots offer unique advantages over wheeled
+platforms or fixed manipulators by combining the traversabil-
+ity of legged locomotion with the dexterity required for
+contact-rich manipulation. Among the many tasks that benefit
+from this combination, door opening is particularly impor-
+tant, as doors often define the boundaries of where robots
+can operate. Since the DARPA Robotics Challenge in 2015
+[1] door opening has remained a canonical benchmark,
+yet most existing approaches have relied on wheeled or
+quadruped platforms [2]–[4]. Humanoid systems typically
+decouple locomotion from manipulation, whereas successful
+door interaction requires tight coupling of the two [5].
+Humanoids are naturally well-suited for this challenge, as
+their morphology reflects the ergonomic design of doors.
+Recent advances have demonstrated impressive humanoid
+agility [6]–[9] and generalization across diverse tasks [10]–
+[13]. Yet progress in locomotion and manipulation has
+largely remained separate. Manipulation efforts, in particular,
+often focus on pick-and-place tasks, which capture only a
+narrow subset of the contact-rich interactions required in
+real-world.
+arXiv:2509.13200v2  [cs.RO]  18 Sep 2025
+
+
+===== PAGE 2 =====
+Door opening introduces challenges beyond typical manip-
+ulation. The robot must reason about articulated affordances,
+as both door and handle are constrained to predefined axes.
+These contact-rich interactions require precise yet robust
+control of dynamics, especially in high degree-of-freedom
+humanoid systems [1]. Moreover, the task is inherently non-
+Markovian and partially observable. Key information such as
+latch state of the handle or the door’s articulation direction
+are not directly observable [2], [14]. As a result, visually sim-
+ilar observations may correspond to different states, leading
+to errors during critical transitions such as unlatching. This
+can be detrimental for the robot to incorrectly perceive the
+believed state, and this ambiguity can cause mode collapse
+especially in long-horizon tasks [15]. Teleoperation from
+human demonstrations may worsen the issue, as human
+operators rely on internal memory of task progress that may
+not be directly observable from the sensors.
+Early solutions, including those from the DARPA Robotics
+Challenge, relied on explicit modeling of geometry, contact
+points, and modular controllers [1], [16]. More recently,
+learning-based methods have shown that imitation learning
+or reinforcement learning can capture these complexities
+implicitly, demonstrating door opening with quadrupeds and
+wheeled manipulators [3], [4], [14]. Yet these systems often
+assume prior knowledge of door parameters or depend on ex-
+ternal sensing (e.g., AR tags), and few extend to humanoids.
+Notably, existing demonstrations of humanoid door opening
+remain mostly teleoperated [5].
+Despite the complexities involved in door opening, to
+humans the task is seemingly quotidian. Our key insight is
+inspired by the natural strategies humans adopt: decomposing
+the long-horizon task into stages such as approaching, grasp-
+ing, unlatching, and pushing. These stages not only structure
+the temporal sequence of actions but also reflect transitions
+in underlying contact dynamics. We implement this idea by
+explicitly conditioning the low-level imitation learning policy
+on a low-dimensional task stage information. Although a
+simple addition to the policy architecture, we observe the sur-
+prising effect that stage-conditioning significantly improves
+success rate. In particular, the stage-conditioned policy can
+disambiguate otherwise identical observations using temporal
+context from the state, and it enables emergent recovery be-
+haviors by re-entering earlier phases when failures occur with
+state-prompting. This enables the policy to address the long-
+horizon, partially observable nature of door opening more
+effectively than standard imitation learning which generally
+has a limited context window size of a few states.
+To summarize, our contributions are:
+•We demonstrate, to our knowledge, the first autonomous
+loco-manipulation policy for humanoid door opening,
+trained entirely from human demonstrations without re-
+lying on external sensing or privileged door information.
+•We introduce a stage-conditioned imitation learning
+framework for long-horizon tasks, and show that stage-
+conditioned policies significantly outperform standard
+behavior cloning, particularly in resolving observation
+ambiguity and enabling failure recovery.
+II. RELATEDWORKS
+A. Contact-rich Humanoid Loco-Manipulation
+Recent advances in humanoid whole-body control have
+demonstrated impressive agility, such as jumping [6] and
+crouching to pick up objects [17], [18]. Two main approaches
+have emerged: decomposition frameworks, which separate
+lower-body locomotion from upper-body control [17], [19]–
+[21], and monolithic frameworks, which train a single RL
+policy across all joints [6]–[8], [11], [22]. While monolithic
+methods enable robust and versatile motions, decomposi-
+tion provides precise upper-body control crucial for contact
+interactions [5]. To acquire upper-body data, works have
+used motion retargeting from MoCap [11], [23], exoskeleton-
+based teleoperation [17], vision-based tracking with motion
+priors [8], or VR teleoperation [18]–[20]. These approaches
+are effective for motion imitation and whole-body coordina-
+tion, but most focus on reference following, leaving contact-
+rich loco-manipulation as an open challenge.
+Door opening exemplifies the challenges of contact-rich
+tasks [1]. Quadrupeds and wheeled bases have shown notable
+progress in general loco-manipulation [24]–[26], though only
+a few address door interaction directly. Prior works rely
+on explicit state estimation or prior knowledge of door
+parameters, such as AR markers for state tracking or as-
+sumptions on articulation models [2], [3], [14]. Efforts to
+open a variety of doors in the wild showed early promise
+toward generalization [4] but were constrained to wheeled
+platforms with limited mobility. Humanoids, by contrast,
+must maintain balance while exerting contact forces, making
+the problem considerably harder. Although door opening is
+a canonical benchmark [1], work on humanoids remains
+scarce, with recent efforts [5] demonstrating door opening
+only in teleoperated settings rather than fully autonomous
+operation.
+B. Encoding State in Long-Horizon Manipulation
+Imitation learning (IL) has achieved impressive results,
+but extending these methods to long-horizon, multi-stage
+tasks remains difficult. A common strategy is to decompose
+tasks into stage-specific policies [27], or in hierarchical
+frameworks [28], where a high-level controller sequences
+primitives and retries after failures. While effective, such
+decomposition can scale poorly, as overall success hinges
+on many specialized components. Recent work therefore
+emphasizes single, general policies conditioned on auxiliary
+inputs, which offer better scalability and generalization [29].
+Conditioning signals vary widely: more generally, language
+instructions can specify sub-goals or corrections [10], [29],
+[30] while explicitly, stage or sub-goal labels can temporally
+ground policies [15], [28].
+Conditioning is particularly valuable in contact-rich set-
+tings, where raw visuomotor inputs often fail to capture
+subtle transitions between contact modes. To address this,
+multimodal signals such as force, torque, or tactile feedback
+
+
+===== PAGE 3 =====
+Whole Body T eleoperation Setup
+Yaw
+Hand,
+Fingers
+Hand
+Fingers
+Waist
+Walk Velocity
+Teleoperation InputUpper 
+Body
+Lower 
+Body
+Robot Input
+Lower Velocity 
+𝑉𝑡
+𝑥𝑦𝑧
+Image
+𝐼𝑡ℎ𝑒𝑎𝑑
+Inverse 
+Kinematics
+Upper State
+𝑞𝑡
+𝑢𝑝𝑝𝑒𝑟
+Dataset
+Fig. 2: Overview of the whole-body teleoperation setup for the G1 humanoid
+robot. Separating upper- and lower-body control provides a more natural
+interface, enabling two operators to jointly collect demonstrations for the
+loco-manipulation task.
+are incorporated, either implicitly [31], [32] via sensor fu-
+sion or explicitly [15] via stage predictors to disambiguate
+transitions between stages. Representations also differ: some
+use discrete one-hot tokens for skills [33] while others
+employ continuous progress variables for task completeness.
+In humanoid contexts, conditioning has been applied through
+explicit state machines that switch among RL-trained skills
+for box manipulation [22] or follow pre-defined contact-
+sequences [7]. In contrast, our method uses a single policy
+conditioned only on stage input, avoiding explicit separation
+between locomotion and manipulation
+III. WHOLE-BODYTELEOPERATION
+A. Whole-Body Teloperation
+The door-opening task requires rotating a spring-loaded
+handle to unlatch the door and then pushing it open, making
+it a two-degree-of-freedom interaction. Because both the
+handle and the door are pre-tensioned with springs, the latch
+re-engages if the handle is not rotated past a certain threshold
+or if the hand slips before pushing. As a result, the task is
+non–quasi-static and demands whole-body coordination to
+simultaneously manage contact forces, door articulation, and
+locomotion. During execution, the humanoid presses down
+on the handle with the bottom of its left fist to apply torque
+and disengage the latch. Once unlatched, it pushes the door
+with the right hand and walks through to complete the task.
+Our teleoperation setup (Fig. 2) uses a Unitree G1 hu-
+manoid with Dex-3 hands, paired with an Apple Vision Pro
+(A VP) headset that captures the operator’s poses and maps
+them to the robot via inverse kinematics (IK). The system
+builds on [19], which focused on tabletop teleoperation,
+but we extend it to support locomotion. A head-mounted
+RealSense camera streams egocentric images to the A VP,
+while retargetting of the human hand poses to the robot’s
+arm is solved with closed-loop IK (Pinocchio [34]) and
+retargetting of human finger to Dex3 is solved with an
+Joint PosJoint torqueImage
+S1 S2 StageS3 S4 S5
+One-hot 
+Stage vector
+Image
+Robot
+State
+Latent
+ACTEnc
+Enc
+Enc
+Action SequenceState Selection
+Fig. 3: TheStageACTframework combines stage-level guidance with low-
+level control, allowing policies to disambiguate partial observations and
+execute contact-rich tasks more reliably.
+optimization tool [35]. Finally the yaw obtained from A VP’s
+IMU is mapped to the robot’s waist joint.
+For lower-body control, we map Xbox controller inputs to
+Unitree’s locomotion API, bounding commanded velocities
+within[−1,1]m/s. This decoupled control allows the oper-
+ator to issue simple velocity commands for walking while
+relying on IK-based retargeting for precise arm and hand
+motions. In our experience, the separation of teleoperation
+roles (locomotion through joystick and manipulation through
+A VP) greatly reduces operator burden yet maintains effective
+whole-body coordination. Because the door–handle gap is
+narrow, inserting the non-compliant and bulky Dex-3 fingers
+was unreliable. Instead, much like how humans often press
+rather than grasp, we found that pushing down with the
+bottom of the fist provided a more stable and sufficient
+strategy for rotating the handle.
+B. Dataset
+Dataset consists of 135 successful door-opening demon-
+strations over two days in two office environments with dif-
+ferent lighting conditions, background appearance, and door
+dynamics (e.g., handle stiffness and hinge damping). In total,
+the teleoperation time exceeds eight hours.Each trial lasted
+approximately 20-30 seconds, where trajectories with failed
+attempts or collisions are removed to ensure consistency.
+Each demonstration trajectoryτ i is represented as a sequence
+of observation–action pairs{(o t, at)}T
+t=1, whereo t denotes
+the observation at timetanda t the corresponding action.
+Observations consist of an RGB imageI t ∈R 480×640×3
+from a head-mounted RealSense camera, the upper-body
+joint stateq upper
+t ∈R 29 including 14 arm, 14 hand, and
+1 waist joint positions. Actions are defined as the target
+joint positions combined together with locomotion velocity
+commandsV xyz
+t ∈R 3, yieldinga t ∈R 32. Following
+ACT [12], the dataset is structured for supervised learning
+by dividing trajectories into fixed-length action chunks of
+horizonH, such that each training sample maps the current
+observationo t to its future action sequencea t:t+H. Formally,
+this results in the datasetD={(o t, at:t+H )|t∈[1, T−H]}.
+This chunking process expands the 135 demonstrations into
+
+
+===== PAGE 4 =====
+Stage 1: Search Stage 2: Approach Stage 3: Rotate Stage 4: Push Stage 5: Stop
+Fig. 4: Timelapse of the long-horizon door opening task categorized into sub-stages. From varying initial positions, the robot searches for the handle,
+rotates it by pressing down with the left fist (preferred over grasping for more reliable teleoperation), and then pushes the door open with the right arm
+while walking through.
+Rotate Waist Left arm 
+approach handle
+Left arm 
+rotate handle
+Walk forward,
+Right arm push S5: Stop Right arm lower,
+Walk stop End
+S2: Approach S3: Rotate
+S4: Push
+Joint Position Joint Torque
+Left 
+Shoulder
+ Pitch
+Right 
+Shoulder
+ Pitch
+S1: Search
+S1 S2
+Stage
+S3 S4 S5 S1 S2
+Stage
+S3 S4 S5
+Fig. 5: Egocentric timelapse of the door opening task segmented into sub-
+stages. Visual observations alone make Stage 2 (approach) and Stage 4
+(push) difficult to distinguish, so stage annotation during post-processing
+also relies on proprioceptive cues. Joint position and torque traces, shown
+for the shoulder pitch of both arms, can capture transitions cues associated
+with contact events.
+thousands of training examples, providing greater data effi-
+ciency and enabling the model to learn temporally coherent
+action predictions.
+IV. LOCO-MANIPULATIONLEARNINGFRAMEWORK
+A. Imitation Learning framework
+Our method,StageACT, builds upon the Action Chunk-
+ing Transformer (ACT) [12], extending it with stage-
+conditioning to address the challenges of partial observability
+for long-horizon loco-manipulation task.
+Following the ACT framework,StageACTframes imita-
+tion learning as a generative modeling problem. The core
+idea is to represent human demonstrations not as single
+deterministic trajectories but as distributions over feasible
+action sequences. ACT achieves this by structuring the policy
+as a conditional variational autoencoder (CV AE)[36], trained
+to generate action sequences conditioned on current obser-
+vations. The CV AE encoder maps the robot’s current joint
+state together with the demonstrated target action sequence
+into a latent variablez. This latent captures the variability of
+human demonstrations providing the policy with expressive
+capacity beyond direct behavior cloning. At test time, the
+encoder is discarded and the latent is fixed to a zero-mean
+Gaussian.
+The CV AE decoder is implemented as a transformer that
+aggregates multiple input modalities through self-attention
+as shown in Fig. 3. Specifically, it receives the current
+camera imageI t, the robot joint stateq upper
+t , and the latent
+variablez. The decoder outputs robot actions ofa t, including
+joint positionq upper
+t and locomotion velocityV xyz
+t . Training
+optimizes two objectives: a reconstruction loss to imitate the
+demonstrated trajectory, and a KL-divergence regularizer to
+constrain the encoder to a Gaussian. We adopt the chunking
+and temporal ensembling strategy proposed in ACT, whereby
+the policy predicts short horizon chunks of 100 steps or
+(approximately 3 seconds) and aggregates them with tempo-
+ral smoothing. This design improves stability during long-
+horizon execution and prevents jittering in the robot’s low-
+level controllers. Hyperparameters and training procedures
+follow those of the original ACT work, with modifications
+only to accommodate stage-conditioning described below.
+Training on RTX5090 GPU took about 4 hours and inference
+ran at 30 Hz.
+B. Stage Conditioning
+While ACT provides a strong imitation baseline, applying
+imitation learning directly to non-Markovian, long-horizon
+tasks remains difficult [28]. Recent works have sought to
+mitigate this challenge by conditioning policies on higher-
+level signals such as sub-stages [28], skill-sets [33], or even
+language instructions [10], [29]. As we are focused on a
+single policy to solve a specific task of opening a door
+rather than generalizing to variety of tasks, we opt for
+the lightweight approach of stage-conditioning to guide hu-
+manoid loco-manipulation. The door opening task naturally
+decomposes into five stages as shown in Fig. 4.
+•(S1)searching for the handle,
+•(S2)approaching handle with left arm,
+•(S3)rotating the handle,
+•(S4)pushing against door with right arm,
+•(S5)stop walking and lower arm to rest position.
+The starting and ending conditions for each of the stages
+are defined by the human annotator post-processing and
+segmenting the demonstration trajectories. From the robot’s
+
+
+===== PAGE 5 =====
+Fig. 6: Comparison of a success case (A) with two failure cases under the baseline imitation learning policy (B, C). In (A), the commanded actions (red)
+closely track the expert trajectories (green). In (B), the left hand collides with the handle after failing to reach high enough, reflecting trajectory averaging
+where both arms are lifted simultaneously. In (C), the base initiates walking prematurely, triggering motions out of sequence.
+egocentric view, a closed door can look the same in different
+stages (Fig. 5). For example, a partial view of the door with
+an initial arm pose could mean either (S1) approaching the
+handle or (S4) starting to push after the handle is unlatched.
+Joint torque; however, is informative for detecting when
+contact forces start or stop. We annotate demonstrations by
+combining visual inspection with proprioceptive cues from
+joint positions and torques. Absolute torque levels are hard
+to interpret across the whole task, but sharp spikes mark
+transitions such as grasping the handle or pushing the door.
+By conditioning the policy on an explicit stage label, we add
+temporal context that resolves these visual ambiguities and
+helps prevent mode collapse.
+During training and evaluation, these stage labels are
+encoded as one-hot vectors and concatenated with the inputs
+to the policy. The stage-vector is input to low-level policy at
+regular intervals, with stage-conditioning serving as a high-
+level guide. This design not only improves robustness and
+task success but also enables controllability at test time,
+where explicit stage prompts allow recovery behaviors and
+even out-of-sequence executions beyond the demonstration
+data, as we demonstrate in the next section.
+V. EXPERIMENTALRESULTS
+We evaluate our approach with respect to two central
+questions. (Q1) Compared to a standard imitation learning
+baseline, how much does stage-conditioning improve policy
+performance? (Q2) Beyond replaying sequential motions in
+the demonstration dataset, can stage-conditioning be used to
+guide novel behaviors through stage prompting? Performance
+is measured using success rate, task completion time, and
+tracking error in both upper and lower body defined as:
+Eupper
+tracking
+
+qupper*
+t
+
+= 1
+T
+TX
+t=1
+qupper
+t −q upper*
+t
+ ,(1)
+Eroot
+tracking
+
+V *
+t
+
+= 1
+T
+TX
+t=1
+V xyz
+t −V xyz∗
+t
+ .(2)
+A. Door Opening Performance
+We first test on a previously unseen door, training on
+two doors and evaluating on a third. Although all doors
+share the same type, the test environment differs in both
+appearance (e.g., lighting, carpet, surrounding furniture) and
+door dynamics (e.g., handle stiffness and hinge damping).
+To verify policy’s robustness rather than merely memorizing
+the demonstrated trajectories, the robot’s initial distance and
+orientation relative to the door were randomized, sometimes
+with the handle in view and sometimes requiring torso
+rotation to locate it. We compare three policies:
+•ACTthe baseline imitation learning model,
+•ACT with historyfrom last 5 observations to mitigate
+partial observability,
+•StageACTour policy with stage-conditioning.
+TABLE I: Door opening performance across different ACT model variants.
+HigherSuccess(success rate) and lowerTime(completion time) indicate
+better performance.
+Model SR (%)↑Time (s)↓E upper
+tracking ↓E root
+tracking ↓
+ACT 20 27.5 0.44 0.05
+ACT with history 10 22.2 0.52 0.06
+StageACT (ours)55 20.7 0.34 0.04
+
+
+===== PAGE 6 =====
+TABLE II: Performance across stages. Fraction is number-of-successes/number-of-attempts. Higher is better. Each stage’s total attempts come from the
+previous stage’s successes.
+Model S1: Search S2: Approach S3: Rotate S4: Push S5: Stop
+ACT 20/20 7/20 6/7 4/6 4/4
+ACT with history 8/10 5/8 1/5 1/1 1/1
+StageACT 19/20 17/19 12/17 11/12 11/11
+Across 50 trials (20, 10, and 20 respectively), our method
+achieved the highest success rate of 55%, more than doubling
+the best baseline as seen in Table I. Stage-conditioning
+also reduced task completion time by preventing robot arm
+wandering when the policy encountered out-of-distribution
+states. The per-stage breakdown (Table II) sheds light on
+the advantage of stage-conditioning. The approach stage
+(S2) proved most ambiguous for the baseline, as visual
+and proprioceptive cues resembled both reaching (S2) and
+pushing (S4). This often led to mode collapse, where the
+baseline blended trajectories (e.g., lifting left arm to approach
+handleandright arm to push door) and therefore not lifting
+the left arm fully above the handle as in Fig. 6 (B) or skipped
+stages entirely—jumping from search (S1) to push (S4) as
+in Fig. 6(C). Quantitatively, the baseline achieved only 7/20
+successes inS2, while stage-conditioning achieved 17/19.
+The main failure mode for our method was the rotation
+stage (S3), which expectedly is the most complex stage
+requiring door handle rotated fully to disengage the latch
+while immediately transitioning to pushing before the handle
+springs back up. We also observeE upper
+tracking andE root
+tracking lowest
+forStageACT. The ground truth forq upper
+t andV xyz
+t are
+reported from mean trajectory from expert demonstrations,
+normalized to match trial duration.
+B. Behavior Guidance
+Beyond improving success rates, stage-conditioning en-
+abled recovery behaviors absent in baseline policies. Since
+failed demonstrations were excluded from training, the
+baseline never attempted retries. In contrast, given stage-
+prompting to return toS1whenS2failed, our policy could
+revert to an earlier stages and retry approaching the handle,
+most often after incomplete handle rotations. Fig. 7 shows
+such recoveries.
+We further investigate whether stage-conditioning provides
+controllability over the low-level policy by prompting non-
+sequential stage labels. For example, we directed the policy
+to executeS1→S4→S5, skipping the canonicalS2and
+S3. Despite the ambiguity betweenS2andS4, the policy
+executed actions consistent with the prompted stage rather
+than immediate observations. This intentional non-sequential
+TABLE III: Ablation study on stage input for door opening. HigherSuccess
+(success rate) and lowerTime(completion time) indicate better performance.
+Model Success (%)↑
+Stage GT humans (ours) 60
+Stage 0 constant 0
+Stage random 0
+Stage 1: Search
+Stage 3 – Successful Rotation
+Undesired 
+motion
+1 2 3 4
+5 6 7
+ 8
+Stage 3 – Failed Handle Rotation 
+Stage 2: Approach Stage 4: Push
+Recovery
+4
+Undesired
+Motion
+Stage 2: Approach
+Fig. 7: Guiding the low-level policy with stage commands enables recovery
+behaviors during the contact-rich handle rotation stage. Without stage
+guidance, the right arm advances immediately after the left arm moves,
+regardless of whether the latch is released. With stage-conditioning, this
+premature motion is suppressed, allowing the policy to retry and complete
+the rotation.
+motion is beneficial for example when the door handle latch
+is disabled, allowing the robot to directly push open the door
+even though such demonstrations were absent in the dataset.
+Finally, we ablated the stage input conditioning. As sum-
+marized in Table III, constant-zero and random labels led
+to degraded performance, while human-guided stage inputs
+maintained high success. This confirms that the policy lever-
+ages stage-conditioning as a meaningful control signal rather
+than ignoring it.
+VI. CONCLUSION
+In this work, we presented StageACT, a stage-conditioned
+imitation learning framework for long-horizon humanoid
+door opening. By conditioning low-level policies on stage
+inputs, our approach improves robustness to observational
+ambiguity, shortens task completion time, and enables recov-
+ery behaviors that baseline imitation policies cannot achieve.
+Moreover, we showed that stage-conditioning allows inten-
+tional behavior guidance through prompting, enabling novel
+out-of-sequence executions not present in the training data.
+Future work.Building on these contributions, we see
+several natural extensions. Our current system focuses on
+door pushing indicates a strong potential for door pulling.
+With additional parameterization, we expect to generalize
+across diverse door types and configurations (push/pull,
+left/right hinges, articulation styles). Future work will also
+investigate the use of VLMs in automatically labeling stages
+during training and, ultimately, serve as high-level classifiers
+at test time. More broadly, as robot foundation models
+
+
+===== PAGE 7 =====
+underscore the value of large-scale demonstrations, a key
+direction is sharing sub-trajectories and task segments across
+task categories. We believe stage conditioning, paired with
+automated stage annotation, offers a strong path toward
+scalable, general-purpose loco-manipulation policies.
+REFERENCES
+[1] E. Krotkov, D. Hackett, L. Jackel, M. Perschbacher, J. Pippine,
+J. Strauss, G. Pratt, and C. Orlowski, “The DARPA robotics challenge
+finals: Results and perspectives,” inThe DARPA robotics challenge
+finals: Humanoid robots to the rescue. Springer, 2018, pp. 1–26.
+[2] E. Arcari, M. V . Minniti, A. Scampicchio, A. Carron, F. Farshidian,
+M. Hutter, and M. N. Zeilinger, “Bayesian multi-task learning MPC for
+robotic mobile manipulation,”IEEE Robotics and Automation Letters,
+vol. 8, no. 6, pp. 3222–3229, 2023.
+[3] M. Zhang, Y . Ma, T. Miki, and M. Hutter, “Learning to open
+and traverse doors with a legged manipulator,”arXiv preprint
+arXiv:2409.04882, 2024.
+[4] H. Xiong, R. Mendonca, K. Shaw, and D. Pathak, “Adaptive mobile
+manipulation for articulated objects in the open world,”arXiv preprint
+arXiv:2401.14403, 2024.
+[5] Y . Zhang, Y . Yuan, P. Gurunath, T. He, S. Omidshafiei, A.-A. Agha-
+Mohammadi, M. Vazquez-Chanlatte, L. Pedersen, and G. Shi, “FAL-
+CON: Learning force-adaptive humanoid loco-manipulation,”arXiv
+preprint arXiv:2505.06776, 2025.
+[6] T. He, J. Gao, W. Xiao, Y . Zhang, Z. Wang, J. Wang, Z. Luo, G. He,
+N. Sobanbab, C. Panet al., “ASAP: Aligning simulation and real-
+world physics for learning agile humanoid whole-body skills,”arXiv
+preprint arXiv:2502.01143, 2025.
+[7] C. Zhang, W. Xiao, T. He, and G. Shi, “Wococo: Learning whole-
+body humanoid control with sequential contacts,”arXiv preprint
+arXiv:2406.06005, 2024.
+[8] Z. Fu, Q. Zhao, Q. Wu, G. Wetzstein, and C. Finn, “HumanPlus:
+Humanoid shadowing and imitation from humans,”arXiv preprint
+arXiv:2406.10454, 2024.
+[9] M. Lee, Y . Kwon, S. Lee, J.-H. Choe, J. Park, H. Jeong, Y . Heo, M.-S.
+Kim, S. Jo, S.-E. Yoonet al., “Dynamic humanoid locomotion over
+rough terrain with streamlined perception-control pipeline,” in2021
+IEEE/RSJ International Conference on Intelligent Robots and Systems
+(IROS). IEEE, 2021, pp. 4111–4117.
+[10] L. X. Shi, Z. Hu, T. Z. Zhao, A. Sharma, K. Pertsch, J. Luo, S. Levine,
+and C. Finn, “Yell at your robot: Improving on-the-fly from language
+corrections,”arXiv preprint arXiv:2403.12910, 2024.
+[11] T. He, Z. Luo, X. He, W. Xiao, C. Zhang, W. Zhang, K. Kitani,
+C. Liu, and G. Shi, “OmniH2O: Universal and dexterous human-
+to-humanoid whole-body teleoperation and learning,”arXiv preprint
+arXiv:2406.08858, 2024.
+[12] T. Z. Zhao, V . Kumar, S. Levine, and C. Finn, “Learning fine-grained
+bimanual manipulation with low-cost hardware,”arXiv preprint
+arXiv:2304.13705, 2023.
+[13] M. Lee, Y . Heo, J. Park, H.-D. Yang, H.-D. Jang, P. Benz, H. Park,
+I. S. Kweon, and J.-H. Oh, “Fast perception, planning, and execution
+for a robotic butler: Wheeled humanoid m-hubo,” inIEEE/RSJ Int.
+Conference on Intelligent Robots and Systems (IROS), 2019.
+[14] C. Schwarke, V . Klemm, M. Van der Boon, M. Bjelonic, and M. Hut-
+ter, “Curiosity-driven learning of joint locomotion and manipulation
+tasks,” inProceedings of the 7th Conference on Robot Learning, vol.
+229. PMLR, 2023, pp. 2594–2610.
+[15] R. Feng, D. Hu, W. Ma, and X. Li, “Play to the score: Stage-guided
+dynamic multi-sensory fusion for robotic manipulation,”arXiv preprint
+arXiv:2408.01366, 2024.
+[16] T. Jung, J. Lim, H. Bae, K. K. Lee, H.-M. Joe, and J.-H. Oh,
+“Development of the humanoid disaster response platform DRC-
+HUBO+,”IEEE Transactions on Robotics, 2018.
+[17] Q. Ben, F. Jia, J. Zeng, J. Dong, D. Lin, and J. Pang, “Homie:
+Humanoid loco-manipulation with isomorphic exoskeleton cockpit,”
+arXiv preprint arXiv:2502.13013, 2025.
+[18] J. Li, X. Cheng, T. Huang, S. Yang, R.-Z. Qiu, and X. Wang, “AMO:
+Adaptive motion optimization for hyper-dexterous humanoid whole-
+body control,”arXiv preprint arXiv:2505.03738, 2025.
+[19] X. Cheng, J. Li, S. Yang, G. Yang, and X. Wang, “Open-television:
+Teleoperation with immersive active visual feedback,”arXiv preprint
+arXiv:2407.01512, 2024.
+[20] C. Lu, X. Cheng, J. Li, S. Yang, M. Ji, C. Yuan, G. Yang, S. Yi, and
+X. Wang, “Mobile-television: Predictive motion priors for humanoid
+whole-body control,” in2025 IEEE International Conference on
+Robotics and Automation (ICRA), 2025.
+[21] X. Cheng, Y . Ji, J. Chen, R. Yang, G. Yang, and X. Wang, “Ex-
+pressive whole-body control for humanoid robots,”arXiv preprint
+arXiv:2402.16796, 2024.
+[22] J. Dao, H. Duan, and A. Fern, “Sim-to-Real learning for humanoid
+box loco-manipulation,” in2024 IEEE International Conference on
+Robotics and Automation (ICRA). IEEE, 2024, pp. 16 930–16 936.
+[23] Z. Luo, J. Cao, J. Merel, A. Winkler, J. Huang, K. Kitani, and
+W. Xu, “Universal humanoid motion representations for physics-based
+control,”arXiv preprint arXiv:2310.04582, 2023.
+[24] H. Ha, Y . Gao, Z. Fu, J. Tan, and S. Song, “UMI on legs: Making
+manipulation policies mobile with manipulation-centric whole-body
+controllers,”arXiv preprint arXiv:2407.10353, 2024.
+[25] Z. Fu, X. Cheng, and D. Pathak, “Deep whole-body control: Learning
+a unified policy for manipulation and locomotion,” inConference on
+Robot Learning (CoRL). PMLR, 2023, pp. 138–149.
+[26] M. Liu, Z. Chen, X. Cheng, Y . Ji, R.-Z. Qiu, R. Yang, and X. Wang,
+“Visual whole-body control for legged loco-manipulation,”arXiv
+preprint arXiv:2403.16967, 2024.
+[27] M. Dalal, M. Liu, W. Talbott, C. Chen, D. Pathak, J. Zhang, and
+R. Salakhutdinov, “Local policies enable zero-shot long-horizon ma-
+nipulation,” in2025 IEEE International Conference on Robotics and
+Automation (ICRA), 2025.
+[28] J. Luo, C. Xu, X. Geng, G. Feng, K. Fang, L. Tan, S. Schaal, and
+S. Levine, “Multistage cable routing through hierarchical imitation
+learning,”IEEE Transactions on Robotics, vol. 40, pp. 1476–1491,
+2024.
+[29] S. Belkhale, T. Ding, T. Xiao, P. Sermanet, Q. Vuong, J. Tompson,
+Y . Chebotar, D. Dwibedi, and D. Sadigh, “RT-H: Action hierarchies
+using language,”arXiv preprint arXiv:2403.01823, 2024.
+[30] Y . Fu, D.-K. Kim, J. Kim, S. Sohn, L. Logeswaran, K. Bae, and
+H. Lee, “AutoGuide: Automated generation and selection of context-
+aware guidelines for large language model agents,” inThe Thirty-
+eighth Annual Conference on Neural Information Processing Systems,
+2024.
+[31] Z. He, H. Fang, J. Chen, H.-S. Fang, and C. Lu, “FoAR: Force-aware
+reactive policy for contact-rich robotic manipulation,”IEEE Robotics
+and Automation Letters, 2025.
+[32] Y . Hou, Z. Liu, C. Chi, E. Cousineau, N. Kuppuswamy, S. Feng,
+B. Burchfiel, and S. Song, “Adaptive compliance policy: Learning
+approximate compliance for diffusion guided control,” in2025 IEEE
+International Conference on Robotics and Automation (ICRA). IEEE,
+2025, pp. 4829–4836.
+[33] Z. Liang, Y . Mu, H. Ma, M. Tomizuka, M. Ding, and P. Luo,
+“SkillDiffuser: Interpretable hierarchical planning via skill abstractions
+in diffusion-based task execution,” inProceedings of the IEEE/CVF
+Conference on Computer Vision and Pattern Recognition, 2024.
+[34] J. Carpentier, G. Saurel, G. Buondonno, J. Mirabel, F. Lamiraux,
+O. Stasse, and N. Mansard, “The Pinocchio C++ library – a fast
+and flexible implementation of rigid body dynamics algorithms and
+their analytical derivatives,” inInternational Symposium on System
+Integration (SII), 2019.
+[35] Y . Qin, W. Yang, B. Huang, K. Van Wyk, H. Su, X. Wang, Y .-W. Chao,
+and D. Fox, “AnyTeleop: A general vision-based dexterous robot arm-
+hand teleoperation system,”arXiv preprint arXiv:2307.04577, 2023.
+[36] K. Sohn, H. Lee, and X. Yan, “Learning structured output represen-
+tation using deep conditional generative models,”Advances in neural
+information processing systems, vol. 28, 2015.

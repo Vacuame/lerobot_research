@@ -1,41 +1,94 @@
 import torch
 import torch.nn as nn
 import torch.nn.functional as F
+
 from lerobot.policies.customACT.configuration_customACT import ACTConfig
 from lerobot.policies.customACT.history_obs_state.configuration_history_obs import HistoryConv1dConfig
 
-class CausalConv1d(nn.Module): # CausalConv：因果卷积，只会padding前面一边，未来信息范围不会padding
-    # ref: https://zhuanlan.zhihu.com/p/552216156
-    def __init__(self, in_channels, out_channels, kernel_size, dilation=1, **kwargs ): 
+
+class CausalConv1d(nn.Module):
+    """一维因果卷积。
+
+    输入形状是 [B, C, T]，其中 T 是时间维度。普通 Conv1d 如果直接 padding，
+    卷积窗口可能会看到当前位置右侧的未来帧；这里手动只在左侧 padding，
+    保证第 t 帧的输出只依赖 t 以及 t 之前的历史。
+    """
+
+    def __init__(self, in_channels, out_channels, kernel_size, dilation=1, **kwargs):
+        """初始化因果卷积层。
+
+        Args:
+            in_channels: 输入通道数，比如状态维度或上一层特征维度。
+            out_channels: 输出通道数。
+            kernel_size: 卷积核大小。
+            dilation: 空洞卷积间隔，用来扩大历史感受野。
+            **kwargs: 传给 nn.Conv1d 的其他参数。
+        """
         super().__init__()
-        self.padding = (kernel_size -1) * dilation # 记录感受野大小，以便在 forward 时用
+        # 只在时间轴左侧补这么多 0，让输出长度仍然等于输入长度。
+        self.padding = (kernel_size - 1) * dilation
         self.conv1d = nn.Conv1d(
-            in_channels, out_channels, kernel_size , stride=1,
-            padding=0, dilation=dilation, **kwargs # 注意这里padding是0，因为后面F.pad才是真正的padding
+            in_channels,
+            out_channels,
+            kernel_size,
+            stride=1,
+            padding=0,
+            dilation=dilation,
+            **kwargs,
         )
 
-    def forward(self, x): 
-        x = F.pad(x, (self.padding , 0))
-        conv1d_out = self.conv1d(x)
-        return conv1d_out
+    def forward(self, x):
+        """执行因果卷积。
+
+        Args:
+            x: [B, C, T]，B 是 batch，C 是通道，T 是历史长度。
+
+        Returns:
+            [B, out_channels, T]，时间长度保持不变。
+        """
+        x = F.pad(x, (self.padding, 0))
+        return self.conv1d(x)
 
 
-class WeightedSegmentPooling(nn.Module):
+class SegmentStatsPooling(nn.Module):
+    """把完整历史序列压缩成固定数量的 history tokens。
+
+    Conv1d 会输出每一帧的特征 [B, C, T]。如果直接把 T 个 token 都丢给 ACT，
+    token 数太多，训练和推理成本都会上升。这里把历史按时间分成 num_segments 段，
+    每段提取 mean / max / last 三种统计量：
+    - mean 表示这一段的平均状态特征；
+    - max 保留这一段里最强的激活；
+    - last 保留这一段末尾的状态，更贴近当前时刻。
+
+    最终输出 [B, num_segments, C * 3]，每个 segment 对应一个 history token。
     """
-    ### 分段权重的池化层
-    #### Args:
-        num_segments (int): 分段数
-        alpha (float): 控制非均匀分段的参数，aplha越大，
-        decay (str): 'exponential' 或 'linear' 或 None，控制段间加权方式。
-    """
-    def __init__(self, num_segments=4, alpha=0.3, decay='exponential'):#在config文件里改,alpha控制分段位置,alpha=0是均匀分段，alpha=1是极度前倾分段，decay控制段间权值，exponential是指数递增，linear是线性递增，None是平权
+
+    def __init__(self, num_segments=4, alpha=0.3, decay=None):
+        """初始化分段池化层。
+
+        Args:
+            num_segments: 把历史序列切成多少段，也就是输出多少个 history tokens。
+            alpha: 控制非均匀切分程度。0 接近均匀切分，越大越偏向保留近端历史细节。
+            decay: 预留参数；当前实现不再用固定权重或可学习 scalar 给段落加权。
+        """
         super().__init__()
-        self.num_segments = num_segments # 分段数
-        self.alpha = alpha # 控制非均匀分段的参数
-        self.decay = decay # 'exponential' 或 'linear' 或 None
-        self.segment_weights = nn.Parameter(torch.ones(self.num_segments))#新增可学习的段权重参数
+        self.num_segments = num_segments
+        self.alpha = alpha
+        self.decay = decay
 
-    def _make_boundaries(self, T):#T是动作帧数
+    def _make_boundaries(self, T):
+        """根据历史长度 T 计算每个 segment 的 [start, end) 区间。
+
+        返回的区间从较早历史到较近历史排列。alpha 会影响切分位置：
+        - alpha 越小，每段长度越接近；
+        - alpha 越大，越倾向于让靠近当前时刻的 segment 更短、更细。
+
+        Args:
+            T: 历史序列长度。
+
+        Returns:
+            list[tuple[int, int]]，每个元素是一个左闭右开区间。
+        """
         diff = self.alpha
         num_segments = self.num_segments
         if not (0 <= diff <= 1):
@@ -43,105 +96,110 @@ class WeightedSegmentPooling(nn.Module):
         if T < num_segments:
             raise ValueError("T must >= num_segments")
 
-        power = 1.0 - diff  # diff=0 → power=1（均匀）；diff=1 → power=0（极度前倾）
+        power = 1.0 - diff
         cuts = [0]
         for i in range(1, num_segments):
             ratio = (i / num_segments) ** (1.0 / (power + 1e-9))
             pos = int(round(ratio * T))
-            cuts.append(max(pos, cuts[-1] + 1))  # 至少比前一个大1
-        cuts.append(T) # [0,1,8,18,32]
-        cuts = cuts[::-1] # [32,18,8,1,0]
-        # print(num_segments, cuts[0], cuts[1], cuts[2], cuts[3], cuts[4])
-        return [(T-cuts[i], T-cuts[i+1]) for i in range(num_segments)] #T为32时得到分段[(0,14),(14,24),(24,31),(31,32)]
+            cuts.append(max(pos, cuts[-1] + 1))
+        cuts.append(T)
+        cuts = cuts[::-1]
+        return [(T - cuts[i], T - cuts[i + 1]) for i in range(num_segments)]
 
     def forward(self, x):
-        B, C, T = x.shape # [B, C, T]
+        """对 Conv1d 后的历史特征做分段统计池化。
+
+        Args:
+            x: [B, C, T]，Conv1d 编码后的逐帧历史特征。
+
+        Returns:
+            [B, num_segments, C * 3]，每段拼接 mean/max/last 三种统计特征。
+        """
+        _, _, T = x.shape
         boundaries = self._make_boundaries(T)
 
-        segment_feats = []#用来存每一个 segment 的 [B, C] 特征
-        prev = 0
-        # 先每段单独池化再加权，相当于每步的权重是w/L，否则段落的长度会影响每段的权值
-        for boundary in boundaries:
-                seg = x[:, :, boundary[0]:boundary[1]]  # [B, C, L] 取时间轴的其中一段，第一段是[B, C, 14],第二段是[B, C, 10]，第三段是[B, C, 7]，第四段是[B, C, 1]
-                seg_mean = seg.mean(dim=-1)  # [B, C] 先对段做简单平均池化（得到每段的平均值）[B, C]
-                segment_feats.append(seg_mean)#一共四段，每段的shape都是[B, C]，存到list里[[B, C], [B, C], [B, C], [B, C]]
-        seg_feats = torch.stack(segment_feats, dim=-1)  # 将四段拼接成[B, C, num_segments]
+        segment_feats = []
+        for start, end in boundaries:
+            seg = x[:, :, start:end]
+            # mean 看整体趋势，max 保留显著响应，last 保留段尾的近时刻信息。
+            seg_mean = seg.mean(dim=-1)
+            seg_max = seg.max(dim=-1).values
+            seg_last = seg[:, :, -1]
+            segment_feats.append(torch.cat([seg_mean, seg_max, seg_last], dim=-1))
 
-        # # 段间权值
-        # if self.decay == 'exponential': # 指数递增 比如[0.14, 0.37, 1.0]
-        #     weights = torch.exp(torch.linspace(-2.0, 0.0, self.num_segments, device=x.device))
-        # elif self.decay == 'linear': # 线性递增 比如[0.1, 0.3, 0.5, 0.7, 1.0]
-        #     weights = torch.linspace(1/self.num_segments, 1.0, self.num_segments, device=x.device)
-        # else: # 平权 [1, 1, 1, ...]
-        #     weights = torch.ones(self.num_segments, device=x.device)
-        # weights = weights / weights.sum() # 归一化，保证加权后结果仍是加权平均（而不是加权求和）
-        weights = torch.softmax(self.segment_weights, dim=0) # 将可学习的段权重参数通过 softmax 转换成权值
-        seg_feats = seg_feats * weights[None, None, :]   # [B, C, num_segments]
-        seg_feats = seg_feats.permute(0, 2, 1)           # [B, num_segments, C]
-        return seg_feats
-    
+        return torch.stack(segment_feats, dim=1)
 
 
+class HistoryConv1dEmbedding(nn.Module):
+    """历史关节状态序列的 Conv1d embedding 模块。
 
-    
+    输入是 history_obs_states，形状 [B, T, state_dim]。这里没有直接使用绝对状态，
+    而是构造两类更适合表达运动趋势的特征：
+    - rel_state: 每一帧相对当前帧的偏移，减少和当前 observation.state token 的重复；
+    - velocity: 相邻帧差分，显式告诉模型过去一段时间的运动方向和速度趋势。
 
-class HistoryConv1dEmbedding(nn.Module): # 卷积特征
+    然后用多层因果 Conv1d 编码时间信息，再用 SegmentStatsPooling 压缩成固定数量
+    的 history tokens，最后投影到 ACT transformer 的 dim_model。
+    """
+
     def __init__(self, config: ACTConfig, modeling_config: HistoryConv1dConfig):
+        """初始化历史状态编码器。
+
+        Args:
+            config: CustomACT 的主配置，提供 state_dim 和 dim_model。
+            modeling_config: 历史模块配置，提供 segment 数量和切分参数。
+        """
         super().__init__()
         self.history_segment_num = modeling_config.history_segment_num
         self.history_segment_alpha = modeling_config.history_segment_alpha
         self.history_segment_decay = modeling_config.history_segment_decay
-        #第一步：三层卷积提取特征
-        self.history_encoder = nn.Sequential( # 三层卷积提取特征
-            # Layer 1
-            CausalConv1d(in_channels=config.robot_state_feature.shape[0], out_channels=64, kernel_size=3,dilation=1),
+
+        state_dim = config.robot_state_feature.shape[0]
+        # 输入通道是 state_dim * 2，因为 forward 里会拼接 rel_state 和 velocity。
+        # dilation=1/2/4 逐层扩大历史感受野，让输出既能看短期变化，也能看更长趋势。
+        self.history_encoder = nn.Sequential(
+            CausalConv1d(in_channels=state_dim * 2, out_channels=64, kernel_size=3, dilation=1),
             nn.ReLU(),
-            nn.BatchNorm1d(64),
-            # Layer 2
-            CausalConv1d(in_channels=64, out_channels=128, kernel_size=3,dilation=2),
+            # GroupNorm 比 BatchNorm 更适合小 batch 机器人训练，统计量不依赖 batch 大小。
+            nn.GroupNorm(8, 64),
+            CausalConv1d(in_channels=64, out_channels=128, kernel_size=3, dilation=2),
             nn.ReLU(),
-            nn.BatchNorm1d(128),
-            # Layer 3
-            CausalConv1d(in_channels=128, out_channels=256, kernel_size=3,dilation=4),
+            nn.GroupNorm(8, 128),
+            CausalConv1d(in_channels=128, out_channels=256, kernel_size=3, dilation=4),
             nn.ReLU(),
-            # nn.AdaptiveAvgPool1d(1),  # [B, 256, T] => [B, 256, 1]
-            # nn.Flatten(start_dim=1),   # [B, 256]
-            # nn.Linear(256, config.dim_model) # [B, 256] => [B, dim_model]
         )
-        #第二步：分段加权池化得到固定长度特征
-        self.segment_pool = WeightedSegmentPooling(
+        # 把 T 帧 Conv 特征压成固定的 num_segments 个 token。
+        self.segment_pool = SegmentStatsPooling(
             num_segments=self.history_segment_num,
             alpha=self.history_segment_alpha,
-            decay=self.history_segment_decay
+            decay=self.history_segment_decay,
         )
-        #第三步：线性变换到模型维度
+        # 每个 segment 的特征是 256 通道的 mean/max/last 拼接，所以输入维度是 256 * 3。
+        # LayerNorm 用来让 history token 的尺度更接近其他 transformer token。
         self.proj = nn.Sequential(
-            nn.Linear(256, config.dim_model),
-            # nn.LayerNorm(config.dim_model) #这个可以考虑加一下
+            nn.Linear(256 * 3, config.dim_model),
+            nn.LayerNorm(config.dim_model),
         )
-        #第四步
-        # self.history_pos_embedding = nn.Parameter(torch.zeros(1, self.history_segment_num, config.dim_model)) # 新增历史位置编码参数
 
-        # #第五步：Transformer编码器进一步融合历史信息
-        # encoder_layer = nn.TransformerEncoderLayer(
-        #     d_model=config.dim_model,
-        #     nhead=8,
-        #     dim_feedforward=config.dim_model * 4,
-        #     dropout=0.1,
-        #     batch_first=True,
-        #     norm_first=True
-        # )
-        # self.history_transformer = nn.TransformerEncoder(
-        #     encoder_layer,
-        #     num_layers=1
-        # )
+    def forward(self, x):
+        """把历史状态序列编码为 ACT encoder 可用的 history tokens。
 
-    def forward(self, x): # input = [B, T, state_dim]
-        x = x.permute(0, 2, 1)  # [B, state_dim, T]
-        feat = self.history_encoder(x)     # [B, 256, T]
-        pooled = self.segment_pool(feat)   # [B, num_segments, 256]
-        out = self.proj(pooled)            # [B, num_segments, dim_model]
-        # out = out + self.history_pos_embedding # 加上历史位置编码
-        # out = self.history_transformer(out) # [B, num_segments, dim_model] 进一步融合历史信息
-        return out
+        Args:
+            x: [B, T, state_dim]，按时间从旧到新排列，最后一帧是当前状态。
 
+        Returns:
+            [B, num_segments, dim_model]，可直接作为多个 token 拼进 ACT encoder。
+        """
+        # 相对当前状态：强调“过去离现在有多远”，弱化绝对关节角的重复信息。
+        rel_state = x - x[:, -1:, :]
+        # 一阶差分：显式建模速度/方向。第一帧没有前一帧，所以保持为 0。
+        velocity = torch.zeros_like(x)
+        velocity[:, 1:, :] = x[:, 1:, :] - x[:, :-1, :]
+        # 拼接后每个时间步的通道数从 state_dim 变为 state_dim * 2。
+        x = torch.cat([rel_state, velocity], dim=-1)
+
+        # Conv1d 要求通道在第 2 维，所以从 [B, T, C] 转成 [B, C, T]。
+        x = x.permute(0, 2, 1)
+        feat = self.history_encoder(x)
+        pooled = self.segment_pool(feat)
+        return self.proj(pooled)

@@ -474,7 +474,7 @@ class ACT(nn.Module):
             n_1d_tokens += 1
 
         if self.config.n_history_obs_states > 0:# 历史动作token
-            n_1d_tokens += 4
+            n_1d_tokens += self.config.ho_history_segment_num
 
         if self.config.use_segment_understanding:# 实例分割理解 token
             n_1d_tokens += 1

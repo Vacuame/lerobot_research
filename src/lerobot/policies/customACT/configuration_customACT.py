@@ -93,7 +93,7 @@ class ACTConfig(PreTrainedConfig):
  # —————————————————————————————————————————————————————————————————————————————————————
 
     # 新增：自定义参数
-    n_history_obs_states:int = 0 # 若 = 0 则关闭此功能，填多少帧
+    n_history_obs_states:int = 32 # 若 = 0 则关闭此功能，填多少帧
     
     # 临时config: history_obs -- ho_
     ho_type:str = 'conv1d'  # 'lstm' or 'conv1d'
