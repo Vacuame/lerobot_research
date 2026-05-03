@@ -1028,10 +1028,12 @@ class LeRobotDataset(torch.utils.data.Dataset):
             item = {**item, **padding}
             for key, val in query_result.items():
                 item[key] = val
-            if OBS_STATE_HISTORY in item and ACTION_HISTORY in item:
+            if OBS_STATE_HISTORY in item:
                 state_pad = item.get(f"{OBS_STATE_HISTORY}_is_pad")
                 action_pad = item.get(f"{ACTION_HISTORY}_is_pad")
-                if state_pad is not None and action_pad is not None:
+                if state_pad is not None and ACTION_HISTORY not in item:
+                    item[HISTORY_MASK] = ~state_pad
+                elif state_pad is not None and action_pad is not None:
                     # Valid recovery history positions must have both a real state and a real previous action.
                     # This prevents clamped/padded action indices at episode starts from leaking into history.
                     history_mask = ~(state_pad | action_pad)

@@ -49,6 +49,7 @@ from lerobot.utils.constants import (
 #新增：自己的import
 from lerobot.policies.customACT.history_obs_state.modeling_history_obs import HistoryObsStateEmbedding
 from lerobot.policies.customACT.history_obs_state.embedding_conv1d_history_obs import RecoveryHistoryTokenEncoder
+from lerobot.policies.customACT.key_history_state.modeling_key_history import KeyHistoryTokenEncoder
 from lerobot.policies.dino_act.backbone_res import ResNet18Backbone, get_custom_backbone
 from lerobot.policies.dino_act.convnext import ConvNeXtBackbone
 from lerobot.policies.dino_act.convnext_frame import ConvNeXtBackbone1
@@ -121,6 +122,8 @@ class ACTPolicy(PreTrainedPolicy):
         if self.config.use_recovery_history_token:
             self._recovery_state_buffer = deque([], maxlen=self.config.history_len)
             self._recovery_action_buffer = deque([], maxlen=self.config.history_len)
+        if self.config.use_key_history_token:
+            self._key_history_state_buffer = deque([], maxlen=self.config.key_history_len)
 
     def _record_recovery_state(self, batch: dict[str, Tensor]) -> None:
         """Record the current normalized proprioceptive state for online inference.
@@ -137,6 +140,16 @@ class ACTPolicy(PreTrainedPolicy):
             state = state.unsqueeze(0)
         assert state.shape[0] == 1, "Online recovery history buffer currently supports batch size 1."
         self._recovery_state_buffer.append(state[0])
+
+    def _record_key_history_state(self, batch: dict[str, Tensor]) -> None:
+        """Record current normalized state for online key-history inference."""
+        if not self.config.use_key_history_token or OBS_STATE_HISTORY in batch:
+            return
+        state = batch[OBS_STATE].detach()
+        if state.ndim == 1:
+            state = state.unsqueeze(0)
+        assert state.shape[0] == 1, "Online key history buffer currently supports batch size 1."
+        self._key_history_state_buffer.append(state[0])
 
     def _record_recovery_action(self, action: Tensor) -> None:
         """Record the normalized action selected at this control step.
@@ -226,6 +239,39 @@ class ACTPolicy(PreTrainedPolicy):
         batch[HISTORY_MASK] = (state_mask & action_mask).unsqueeze(0)
         return batch
 
+    def _add_key_history_to_batch(self, batch: dict[str, Tensor]) -> dict[str, Tensor]:
+        """Attach key-history state fields to an online inference batch.
+
+        Training batches get observation.state.history from dataset delta timestamps.
+        In deployment, this method builds:
+          - observation.state.history: [1, H, state_dim]
+          - history_mask: [1, H]
+        """
+        if not self.config.use_key_history_token or OBS_STATE_HISTORY in batch:
+            return batch
+        if len(self._key_history_state_buffer) == 0:
+            self._record_key_history_state(batch)
+
+        batch = dict(batch)
+        current_state = batch[OBS_STATE]
+        if current_state.ndim == 1:
+            current_state = current_state.unsqueeze(0)
+        assert current_state.shape[0] == 1, "Online key history buffer currently supports batch size 1."
+
+        state_pad_value = self._key_history_state_buffer[0].view(1, -1).to(current_state.device)
+        state_values = [
+            v.to(current_state.device, dtype=current_state.dtype) for v in self._key_history_state_buffer
+        ]
+        state_history, state_mask = self._left_pad_history(
+            state_values,
+            target_len=self.config.key_history_len,
+            pad_value=state_pad_value,
+        )
+
+        batch[OBS_STATE_HISTORY] = state_history.unsqueeze(0)
+        batch[HISTORY_MASK] = state_mask.unsqueeze(0)
+        return batch
+
     @torch.no_grad()
     def select_action(self, batch: dict[str, Tensor]) -> Tensor:
         
@@ -237,6 +283,7 @@ class ACTPolicy(PreTrainedPolicy):
         """
         self.eval()  # keeping the policy in eval mode as it could be set to train mode while queue is consumed
         self._record_recovery_state(batch)
+        self._record_key_history_state(batch)
 
         if self.config.temporal_ensemble_coeff is not None:
             actions = self.predict_action_chunk(batch)
@@ -265,6 +312,7 @@ class ACTPolicy(PreTrainedPolicy):
             batch = dict(batch)  # shallow copy so that adding a key doesn't modify the original
             batch[OBS_IMAGES] = [batch[key] for key in self.config.image_features]
         batch = self._add_recovery_history_to_batch(batch)
+        batch = self._add_key_history_to_batch(batch)
 
         actions = self.model(batch)[0]
         return actions
@@ -355,6 +403,44 @@ class ACTPolicy(PreTrainedPolicy):
                 loss_dict["event_score_mean"] = event_scores[history_mask].mean().item()
             else:
                 loss_dict["event_score_mean"] = 0.0
+
+        key_history_aux_outputs = getattr(self.model, "key_history_aux_outputs", None)
+        if self.config.use_key_history_token and key_history_aux_outputs is not None:
+            first_action_mask = (~batch["action_is_pad"][:, 0]).unsqueeze(-1).to(dtype=batch[ACTION].dtype)
+
+            if self.config.key_history_action_loss_weight > 0:
+                key_hist_action_loss = (
+                    F.mse_loss(
+                        key_history_aux_outputs["hist_action_pred"],
+                        batch[ACTION][:, 0],
+                        reduction="none",
+                    )
+                    * first_action_mask
+                ).mean()
+                loss = loss + self.config.key_history_action_loss_weight * key_hist_action_loss
+                loss_dict["key_history_action_loss"] = key_hist_action_loss.item()
+
+            if self.config.key_history_event_loss_weight > 0:
+                history_mask = batch[HISTORY_MASK].to(dtype=torch.bool)
+                valid = history_mask.to(dtype=batch[ACTION].dtype)
+                event_prior = key_history_aux_outputs["event_prior"]
+                event_scores = key_history_aux_outputs["event_scores"]
+                denom = valid.sum(dim=1, keepdim=True).clamp_min(1.0)
+                prior_mean = (event_prior * valid).sum(dim=1, keepdim=True) / denom
+                prior_var = (((event_prior - prior_mean) * valid) ** 2).sum(dim=1, keepdim=True) / denom
+                normalized_prior = (event_prior - prior_mean) / (prior_var.sqrt() + 1e-6)
+                key_event_prior_loss = (
+                    (torch.sigmoid(event_scores) - torch.sigmoid(normalized_prior)).pow(2) * valid
+                ).sum() / valid.sum().clamp_min(1.0)
+                loss = loss + self.config.key_history_event_loss_weight * key_event_prior_loss
+                loss_dict["key_history_event_prior_loss"] = key_event_prior_loss.item()
+
+            history_mask = batch[HISTORY_MASK].to(dtype=torch.bool)
+            event_scores = key_history_aux_outputs["event_scores"]
+            if history_mask.any():
+                loss_dict["key_history_event_score_mean"] = event_scores[history_mask].mean().item()
+            else:
+                loss_dict["key_history_event_score_mean"] = 0.0
 
         return loss, loss_dict
 
@@ -621,6 +707,25 @@ class ACT(nn.Module):
                 torch.zeros(config.history_num_segments, config.dim_model)
             )
             self.recovery_aux_outputs = None
+
+        if self.config.use_key_history_token:
+            self.key_history_encoder = KeyHistoryTokenEncoder(
+                state_dim=self.config.robot_state_feature.shape[0],
+                action_dim=self.config.action_feature.shape[0],
+                dim_model=config.dim_model,
+                history_len=config.key_history_len,
+                num_segments=config.key_history_num_segments,
+                hidden_dim=config.key_history_hidden_dim,
+                conv_kernel_size=config.key_history_conv_kernel_size,
+                conv_dilations=config.key_history_conv_dilations,
+                dropout=config.key_history_dropout,
+                prior_scale_init=config.key_history_prior_scale_init,
+                selection_temperature=config.key_history_selection_temperature,
+            )
+            self.key_history_token_pos_embed = nn.Parameter(
+                torch.zeros(config.key_history_num_segments, config.dim_model)
+            )
+            self.key_history_aux_outputs = None
         
 
 
@@ -733,6 +838,8 @@ class ACT(nn.Module):
 
         if self.config.use_recovery_history_token:
             self.recovery_aux_outputs = None
+        if self.config.use_key_history_token:
+            self.key_history_aux_outputs = None
 
         if self.config.use_vae and self.training:
             assert ACTION in batch, (
@@ -847,6 +954,19 @@ class ACT(nn.Module):
             recovery_tokens = recovery_tokens.permute(1, 0, 2)  # [history_num_segments, B, D]
             encoder_in_tokens.extend(list(recovery_tokens))
             encoder_in_pos_embed.extend(list(self.recovery_token_pos_embed.unsqueeze(1)))
+
+        if self.config.use_key_history_token:
+            missing = [key for key in (OBS_STATE_HISTORY, HISTORY_MASK) if key not in batch]
+            if missing:
+                raise KeyError(f"Missing key history batch keys: {missing}")
+            key_history_tokens, self.key_history_aux_outputs = self.key_history_encoder(
+                state_history=batch[OBS_STATE_HISTORY],
+                current_state=batch[OBS_STATE],
+                history_mask=batch[HISTORY_MASK],
+            )
+            key_history_tokens = key_history_tokens.permute(1, 0, 2)
+            encoder_in_tokens.extend(list(key_history_tokens))
+            encoder_in_pos_embed.extend(list(self.key_history_token_pos_embed.unsqueeze(1)))
 
         if self.config.image_features:
             # For a list of images, the H and W may vary but H*W is constant.
