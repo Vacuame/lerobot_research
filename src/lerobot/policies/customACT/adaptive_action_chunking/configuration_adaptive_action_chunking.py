@@ -35,3 +35,9 @@ class AdaptiveActionChunkingConfig:
     unstable_old_action_weight: float = 0.05
     min_old_action_weight: float = 0.0
     max_old_action_weight: float = 0.9
+
+    # Realtime terminal debugging. Disabled by default to avoid slowing control.
+    debug_print_chunks: bool = True
+    debug_print_every: int = 1
+    debug_print_num_actions: int = 3
+    debug_print_action_dims: int = 6

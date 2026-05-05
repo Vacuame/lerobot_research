@@ -46,12 +46,20 @@ class AdaptiveActionChunkingController:
         self.previous_chunk_size: int | None = None
         self.latest_decision: AdaptiveActionChunkingDecision | None = None
         self.ensembled_actions: Tensor | None = None
+        self.prediction_count = 0
+        self.execution_count = 0
+        self.current_chunk_size = 0
+        self.current_chunk_step = 0
 
     def reset(self) -> None:
         self.state_history.clear()
         self.previous_chunk_size = None
         self.latest_decision = None
         self.ensembled_actions = None
+        self.prediction_count = 0
+        self.execution_count = 0
+        self.current_chunk_size = 0
+        self.current_chunk_step = 0
 
     def observe_state(self, state: Tensor | None) -> None:
         if state is None:
@@ -153,6 +161,65 @@ class AdaptiveActionChunkingController:
             self.ensembled_actions = None
         return action
 
+    def debug_prediction(
+        self,
+        *,
+        predicted_actions: Tensor,
+        executed_actions: Tensor,
+        decision: AdaptiveActionChunkingDecision | None,
+        source: str,
+    ) -> None:
+        if not self.config.debug_print_chunks:
+            return
+        self.prediction_count += 1
+        predicted_len = predicted_actions.shape[1]
+        executed_len = executed_actions.shape[1]
+        self.current_chunk_size = executed_len
+        self.current_chunk_step = 0
+
+        every = max(1, self.config.debug_print_every)
+        if (self.prediction_count - 1) % every != 0:
+            return
+
+        if decision is None:
+            metrics = "aac=off"
+        else:
+            recovery = "none" if decision.recovery_score is None else f"{decision.recovery_score:.4f}"
+            metrics = (
+                f"regime={decision.regime} base_k={decision.base_chunk_size} "
+                f"k_final={decision.chunk_size} old_w={decision.old_action_weight:.3f} "
+                f"state_v={decision.state_volatility:.4f} state_a={decision.state_acceleration:.4f} "
+                f"act_u={decision.action_uncertainty:.4f} recovery={recovery}"
+            )
+
+        print(
+            f"[AAC][predict #{self.prediction_count}][{source}] "
+            f"predicted_chunk={predicted_len} executed_chunk={executed_len} {metrics}",
+            flush=True,
+        )
+        print(
+            f"[AAC][predict #{self.prediction_count}] predicted_preview="
+            f"{self._preview_actions(predicted_actions)}",
+            flush=True,
+        )
+        print(
+            f"[AAC][predict #{self.prediction_count}] executed_preview="
+            f"{self._preview_actions(executed_actions)}",
+            flush=True,
+        )
+
+    def debug_execution(self, *, action: Tensor, remaining_actions: int, source: str) -> None:
+        if not self.config.debug_print_chunks:
+            return
+        self.execution_count += 1
+        self.current_chunk_step += 1
+        print(
+            f"[AAC][execute #{self.execution_count}][{source}] "
+            f"chunk_step={self.current_chunk_step}/{self.current_chunk_size} "
+            f"remaining={remaining_actions} action={self._preview_action(action)}",
+            flush=True,
+        )
+
     def _state_motion_stats(self) -> tuple[float, float]:
         if len(self.state_history) < 2:
             return 0.0, 0.0
@@ -225,3 +292,20 @@ class AdaptiveActionChunkingController:
     @staticmethod
     def _clip_chunk_size(chunk_size: int, min_chunk_size: int, max_chunk_size: int) -> int:
         return int(min(max(chunk_size, min_chunk_size), max_chunk_size))
+
+    def _preview_actions(self, actions: Tensor) -> list[list[float]]:
+        num_actions = max(0, self.config.debug_print_num_actions)
+        action_dims = max(0, self.config.debug_print_action_dims)
+        if num_actions == 0 or action_dims == 0:
+            return []
+        preview = actions[0, :num_actions, :action_dims].detach().float().cpu()
+        return [[round(float(v), 4) for v in row] for row in preview]
+
+    def _preview_action(self, action: Tensor) -> list[float]:
+        action_dims = max(0, self.config.debug_print_action_dims)
+        if action_dims == 0:
+            return []
+        action = action.detach().float().cpu()
+        if action.ndim == 2:
+            action = action[0]
+        return [round(float(v), 4) for v in action[:action_dims]]

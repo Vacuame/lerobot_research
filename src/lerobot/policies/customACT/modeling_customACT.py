@@ -326,7 +326,14 @@ class ACTPolicy(PreTrainedPolicy):
         chunk_size = decision.chunk_size
         if max_actions_per_chunk is not None:
             chunk_size = min(chunk_size, max_actions_per_chunk)
-        return actions[:, :chunk_size]
+        selected_actions = actions[:, :chunk_size]
+        self.adaptive_action_chunker.debug_prediction(
+            predicted_actions=actions,
+            executed_actions=selected_actions,
+            decision=decision,
+            source="action_chunk",
+        )
+        return selected_actions
 
     @torch.no_grad()
     def select_action(self, batch: dict[str, Tensor]) -> Tensor:
@@ -348,6 +355,22 @@ class ACTPolicy(PreTrainedPolicy):
                     actions,
                     old_action_weight=decision.old_action_weight,
                 )
+                self.adaptive_action_chunker.debug_prediction(
+                    predicted_actions=actions,
+                    executed_actions=actions[:, :1],
+                    decision=decision,
+                    source="temporal_ensemble",
+                )
+                remaining = (
+                    0
+                    if self.adaptive_action_chunker.ensembled_actions is None
+                    else self.adaptive_action_chunker.ensembled_actions.shape[1]
+                )
+                self.adaptive_action_chunker.debug_execution(
+                    action=action,
+                    remaining_actions=remaining,
+                    source="temporal_ensemble",
+                )
             else:
                 action = self.temporal_ensembler.update(actions)
             self._record_recovery_action(action)
@@ -363,6 +386,12 @@ class ACTPolicy(PreTrainedPolicy):
             # effectively has shape (n_action_steps, batch_size, *), hence the transpose.
             self._action_queue.extend(actions.transpose(0, 1))
         action = self._action_queue.popleft()
+        if self.adaptive_action_chunker is not None:
+            self.adaptive_action_chunker.debug_execution(
+                action=action,
+                remaining_actions=len(self._action_queue),
+                source="select_action",
+            )
         self._record_recovery_action(action)
         return action
 

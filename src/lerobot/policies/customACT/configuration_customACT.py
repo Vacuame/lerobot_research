@@ -320,6 +320,10 @@ class ACTConfig(PreTrainedConfig):
                 raise ValueError(
                     "`adaptive_action_chunking.action_uncertainty_low` must be <= action_uncertainty_high."
                 )
+            if aac.debug_print_every <= 0:
+                raise ValueError("`adaptive_action_chunking.debug_print_every` must be positive.")
+            if aac.debug_print_num_actions < 0 or aac.debug_print_action_dims < 0:
+                raise ValueError("Adaptive chunk debug preview sizes cannot be negative.")
 
     def get_optimizer_preset(self) -> AdamWConfig:
         return AdamWConfig(
