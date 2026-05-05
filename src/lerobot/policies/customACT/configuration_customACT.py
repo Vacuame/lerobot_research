@@ -20,6 +20,7 @@ from lerobot.configs.types import NormalizationMode
 from lerobot.optim.optimizers import AdamWConfig
 from lerobot.policies.customACT.history_obs_state.configuration_history_obs import HistoryObsConfig, HistoryLSTMConfig, HistoryConv1dConfig
 from lerobot.policies.customACT.key_history_state.configuration_key_history import KeyHistoryTokenConfig
+from lerobot.policies.customACT.adaptive_action_chunking.configuration_adaptive_action_chunking import AdaptiveActionChunkingConfig
 from lerobot.policies.customACT.segment_understanding.configuration_segment_understanding import SegmentUnderstandingConfig
 
 @PreTrainedConfig.register_subclass("customACT")
@@ -178,6 +179,12 @@ class ACTConfig(PreTrainedConfig):
     use_segment_understanding: bool = False
     seg_config: SegmentUnderstandingConfig = field(default_factory=SegmentUnderstandingConfig)
 
+    # Inference-only history-aware Adaptive Action Chunking.
+    use_adaptive_action_chunking: bool = True
+    adaptive_action_chunking: AdaptiveActionChunkingConfig = field(
+        default_factory=AdaptiveActionChunkingConfig
+    )
+
     # Input / output structure.
     n_obs_steps: int = 1
     chunk_size: int = 100
@@ -289,6 +296,30 @@ class ACTConfig(PreTrainedConfig):
                 raise ValueError("`key_history_selection_temperature` must be positive.")
             if self.key_history_token_pos_embed != "learned":
                 raise ValueError("Only `key_history_token_pos_embed='learned'` is currently supported.")
+        if self.use_adaptive_action_chunking:
+            aac = self.adaptive_action_chunking
+            if aac.state_history_len < 2:
+                raise ValueError("`adaptive_action_chunking.state_history_len` must be >= 2.")
+            if aac.min_chunk_size <= 0:
+                raise ValueError("`adaptive_action_chunking.min_chunk_size` must be positive.")
+            if aac.max_chunk_size < 0:
+                raise ValueError("`adaptive_action_chunking.max_chunk_size` cannot be negative.")
+            if aac.max_chunk_size and aac.max_chunk_size < aac.min_chunk_size:
+                raise ValueError(
+                    "`adaptive_action_chunking.max_chunk_size` must be >= min_chunk_size when set."
+                )
+            if aac.stable_chunk_multiplier <= 0 or aac.unstable_chunk_multiplier <= 0:
+                raise ValueError("Adaptive chunk multipliers must be positive.")
+            if aac.volatility_low < 0 or aac.volatility_high < 0 or aac.acceleration_high < 0:
+                raise ValueError("Adaptive chunk motion thresholds cannot be negative.")
+            if aac.volatility_low > aac.volatility_high:
+                raise ValueError("`adaptive_action_chunking.volatility_low` must be <= volatility_high.")
+            if aac.action_uncertainty_low < 0 or aac.action_uncertainty_high < 0:
+                raise ValueError("Adaptive chunk action uncertainty thresholds cannot be negative.")
+            if aac.action_uncertainty_low > aac.action_uncertainty_high:
+                raise ValueError(
+                    "`adaptive_action_chunking.action_uncertainty_low` must be <= action_uncertainty_high."
+                )
 
     def get_optimizer_preset(self) -> AdamWConfig:
         return AdamWConfig(

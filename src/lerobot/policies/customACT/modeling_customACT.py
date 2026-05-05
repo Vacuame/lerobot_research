@@ -50,6 +50,7 @@ from lerobot.utils.constants import (
 from lerobot.policies.customACT.history_obs_state.modeling_history_obs import HistoryObsStateEmbedding
 from lerobot.policies.customACT.history_obs_state.embedding_conv1d_history_obs import RecoveryHistoryTokenEncoder
 from lerobot.policies.customACT.key_history_state.modeling_key_history import KeyHistoryTokenEncoder
+from lerobot.policies.customACT.adaptive_action_chunking import AdaptiveActionChunkingController
 from lerobot.policies.dino_act.backbone_res import ResNet18Backbone, get_custom_backbone
 from lerobot.policies.dino_act.convnext import ConvNeXtBackbone
 from lerobot.policies.dino_act.convnext_frame import ConvNeXtBackbone1
@@ -90,6 +91,16 @@ class ACTPolicy(PreTrainedPolicy):
         if config.temporal_ensemble_coeff is not None:
             self.temporal_ensembler = ACTTemporalEnsembler(config.temporal_ensemble_coeff, config.chunk_size)
 
+        self.adaptive_action_chunker = None
+        if config.use_adaptive_action_chunking:
+            self.adaptive_action_chunker = AdaptiveActionChunkingController(
+                config.adaptive_action_chunking,
+                policy_chunk_size=config.chunk_size,
+                policy_n_action_steps=(
+                    config.chunk_size if config.temporal_ensemble_coeff is not None else config.n_action_steps
+                ),
+            )
+
         self.reset()
 
     def get_optim_params(self) -> dict:
@@ -119,6 +130,8 @@ class ACTPolicy(PreTrainedPolicy):
             self.temporal_ensembler.reset()
         else:
             self._action_queue = deque([], maxlen=self.config.n_action_steps)
+        if self.adaptive_action_chunker is not None:
+            self.adaptive_action_chunker.reset()
         if self.config.use_recovery_history_token:
             self._recovery_state_buffer = deque([], maxlen=self.config.history_len)
             self._recovery_action_buffer = deque([], maxlen=self.config.history_len)
@@ -272,6 +285,49 @@ class ACTPolicy(PreTrainedPolicy):
         batch[HISTORY_MASK] = state_mask.unsqueeze(0)
         return batch
 
+    def _observe_adaptive_action_chunking_state(self, batch: dict[str, Tensor]) -> None:
+        if self.adaptive_action_chunker is None:
+            return
+        self.adaptive_action_chunker.observe_state(batch.get(OBS_STATE))
+
+    def prepare_online_inference_step(self, batch: dict[str, Tensor]) -> None:
+        """Update online history buffers before a policy inference call."""
+        self._record_recovery_state(batch)
+        self._record_key_history_state(batch)
+        self._observe_adaptive_action_chunking_state(batch)
+
+    def _get_recovery_score_for_adaptive_action_chunking(self) -> float | None:
+        recovery_aux_outputs = getattr(self.model, "recovery_aux_outputs", None)
+        if not recovery_aux_outputs or "recovery_score" not in recovery_aux_outputs:
+            return None
+        return float(recovery_aux_outputs["recovery_score"].detach().mean().item())
+
+    def _decide_adaptive_action_chunking(self, actions: Tensor):
+        if self.adaptive_action_chunker is None:
+            return None
+        return self.adaptive_action_chunker.decide(
+            actions,
+            recovery_score=self._get_recovery_score_for_adaptive_action_chunking(),
+        )
+
+    def adapt_action_chunk_for_inference(
+        self,
+        actions: Tensor,
+        *,
+        max_actions_per_chunk: int | None = None,
+    ) -> Tensor:
+        """Return the action prefix selected by the adaptive chunk controller."""
+        if self.adaptive_action_chunker is None:
+            if max_actions_per_chunk is None:
+                max_actions_per_chunk = self.config.n_action_steps
+            return actions[:, :max_actions_per_chunk]
+
+        decision = self._decide_adaptive_action_chunking(actions)
+        chunk_size = decision.chunk_size
+        if max_actions_per_chunk is not None:
+            chunk_size = min(chunk_size, max_actions_per_chunk)
+        return actions[:, :chunk_size]
+
     @torch.no_grad()
     def select_action(self, batch: dict[str, Tensor]) -> Tensor:
         
@@ -282,19 +338,26 @@ class ACTPolicy(PreTrainedPolicy):
         queue is empty.
         """
         self.eval()  # keeping the policy in eval mode as it could be set to train mode while queue is consumed
-        self._record_recovery_state(batch)
-        self._record_key_history_state(batch)
+        self.prepare_online_inference_step(batch)
 
         if self.config.temporal_ensemble_coeff is not None:
             actions = self.predict_action_chunk(batch)
-            action = self.temporal_ensembler.update(actions)
+            decision = self._decide_adaptive_action_chunking(actions)
+            if decision is not None:
+                action = self.adaptive_action_chunker.update_temporal_ensemble(
+                    actions,
+                    old_action_weight=decision.old_action_weight,
+                )
+            else:
+                action = self.temporal_ensembler.update(actions)
             self._record_recovery_action(action)
             return action
 
         # Action queue logic for n_action_steps > 1. When the action_queue is depleted, populate it by
         # querying the policy.
         if len(self._action_queue) == 0:
-            actions = self.predict_action_chunk(batch)[:, : self.config.n_action_steps]
+            actions = self.predict_action_chunk(batch)
+            actions = self.adapt_action_chunk_for_inference(actions)
 
             # `self.model.forward` returns a (batch_size, n_action_steps, action_dim) tensor, but the queue
             # effectively has shape (n_action_steps, batch_size, *), hence the transpose.
