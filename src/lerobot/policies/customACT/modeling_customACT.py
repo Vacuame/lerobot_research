@@ -50,7 +50,10 @@ from lerobot.utils.constants import (
 from lerobot.policies.customACT.history_obs_state.modeling_history_obs import HistoryObsStateEmbedding
 from lerobot.policies.customACT.history_obs_state.embedding_conv1d_history_obs import RecoveryHistoryTokenEncoder
 from lerobot.policies.customACT.key_history_state.modeling_key_history import KeyHistoryTokenEncoder
-from lerobot.policies.customACT.adaptive_action_chunking import AdaptiveActionChunkingController
+from lerobot.policies.customACT.recovery_adaptive_chunking import (
+    AdaptiveActionChunkingController,
+    compute_recovery_score_loss,
+)
 from lerobot.policies.dino_act.backbone_res import ResNet18Backbone, get_custom_backbone
 from lerobot.policies.dino_act.convnext import ConvNeXtBackbone
 from lerobot.policies.dino_act.convnext_frame import ConvNeXtBackbone1
@@ -94,7 +97,7 @@ class ACTPolicy(PreTrainedPolicy):
         self.adaptive_action_chunker = None
         if config.use_adaptive_action_chunking:
             self.adaptive_action_chunker = AdaptiveActionChunkingController(
-                config.adaptive_action_chunking,
+                config.recovery_adaptive_chunking.adaptive_action_chunking,
                 policy_chunk_size=config.chunk_size,
                 policy_n_action_steps=(
                     config.chunk_size if config.temporal_ensemble_coeff is not None else config.n_action_steps
@@ -485,8 +488,8 @@ class ACTPolicy(PreTrainedPolicy):
 
             loss = (
                 loss
-                + self.config.history_action_loss_weight * hist_action_loss
-                + self.config.event_prior_loss_weight * event_prior_loss
+                + self.config.recovery_adaptive_chunking.action_loss_weight * hist_action_loss
+                + self.config.recovery_adaptive_chunking.event_prior_loss_weight * event_prior_loss
             )
             loss_dict["hist_action_loss"] = hist_action_loss.item()
             loss_dict["event_prior_loss"] = event_prior_loss.item()
@@ -495,6 +498,28 @@ class ACTPolicy(PreTrainedPolicy):
                 loss_dict["event_score_mean"] = event_scores[history_mask].mean().item()
             else:
                 loss_dict["event_score_mean"] = 0.0
+
+            if self.config.recovery_adaptive_chunking.recovery_score_loss_weight > 0:
+                recovery_score_loss, recovery_target_info = compute_recovery_score_loss(
+                    recovery_score=recovery_aux_outputs["recovery_score"],
+                    state_history=batch[OBS_STATE_HISTORY],
+                    action_history=batch[ACTION_HISTORY],
+                    future_actions=batch[ACTION],
+                    history_mask=batch[HISTORY_MASK],
+                    action_is_pad=batch.get("action_is_pad"),
+                    config=self.config.recovery_adaptive_chunking,
+                )
+                loss = (
+                    loss
+                    + self.config.recovery_adaptive_chunking.recovery_score_loss_weight
+                    * recovery_score_loss
+                )
+                loss_dict["recovery_score_loss"] = recovery_score_loss.item()
+                loss_dict["recovery_target_mean"] = recovery_target_info["target"].mean().item()
+                loss_dict["recovery_raw_score_mean"] = recovery_target_info["raw_score"].mean().item()
+                loss_dict["future_action_correction_mean"] = (
+                    recovery_target_info["future_action_correction"].mean().item()
+                )
 
         key_history_aux_outputs = getattr(self.model, "key_history_aux_outputs", None)
         if self.config.use_key_history_token and key_history_aux_outputs is not None:
@@ -782,21 +807,22 @@ class ACT(nn.Module):
             self.history_aux_action_head = nn.Linear(config.dim_model, self.config.action_feature.shape[0])
             self.history_aux_action_hat = None
 
-        if self.config.use_recovery_history_token:
+        recovery_adaptive_cfg = self.config.recovery_adaptive_chunking
+        if recovery_adaptive_cfg.use_recovery_token:
             self.recovery_history_encoder = RecoveryHistoryTokenEncoder(
                 state_dim=self.config.robot_state_feature.shape[0],
                 action_dim=self.config.action_feature.shape[0],
                 dim_model=config.dim_model,
-                history_len=config.history_len,
-                history_num_segments=config.history_num_segments,
-                history_hidden_dim=config.history_hidden_dim,
-                history_conv_kernel_size=config.history_conv_kernel_size,
-                history_conv_dilations=config.history_conv_dilations,
-                history_dropout=config.history_dropout,
-                use_action_state_error=config.use_action_state_error,
+                history_len=recovery_adaptive_cfg.history_len,
+                history_num_segments=recovery_adaptive_cfg.num_segments,
+                history_hidden_dim=recovery_adaptive_cfg.hidden_dim,
+                history_conv_kernel_size=recovery_adaptive_cfg.conv_kernel_size,
+                history_conv_dilations=recovery_adaptive_cfg.conv_dilations,
+                history_dropout=recovery_adaptive_cfg.dropout,
+                use_action_state_error=recovery_adaptive_cfg.use_action_state_error,
             )
             self.recovery_token_pos_embed = nn.Parameter(
-                torch.zeros(config.history_num_segments, config.dim_model)
+                torch.zeros(recovery_adaptive_cfg.num_segments, config.dim_model)
             )
             self.recovery_aux_outputs = None
 

@@ -21,6 +21,9 @@ from lerobot.optim.optimizers import AdamWConfig
 from lerobot.policies.customACT.history_obs_state.configuration_history_obs import HistoryObsConfig, HistoryLSTMConfig, HistoryConv1dConfig
 from lerobot.policies.customACT.key_history_state.configuration_key_history import KeyHistoryTokenConfig
 from lerobot.policies.customACT.adaptive_action_chunking.configuration_adaptive_action_chunking import AdaptiveActionChunkingConfig
+from lerobot.policies.customACT.recovery_adaptive_chunking.configuration_recovery_adaptive_chunking import (
+    RecoveryAdaptiveChunkingConfig,
+)
 from lerobot.policies.customACT.segment_understanding.configuration_segment_understanding import SegmentUnderstandingConfig
 
 @PreTrainedConfig.register_subclass("customACT")
@@ -185,6 +188,14 @@ class ACTConfig(PreTrainedConfig):
     adaptive_action_chunking: AdaptiveActionChunkingConfig = field(
         default_factory=AdaptiveActionChunkingConfig
     )
+    # Unified config for the recovery token, recovery score pseudo-label, and adaptive chunk controller.
+    # Existing top-level fields remain supported; __post_init__ syncs them into this nested config.
+    recovery_adaptive_chunking: RecoveryAdaptiveChunkingConfig = field(
+        default_factory=RecoveryAdaptiveChunkingConfig
+    )
+    # False keeps legacy top-level fields as the source of truth. Set True for new
+    # experiments that configure recovery token + AAC only through the nested config.
+    use_recovery_adaptive_chunking_config: bool = False
 
     # Input / output structure.
     n_obs_steps: int = 1
@@ -240,6 +251,10 @@ class ACTConfig(PreTrainedConfig):
 
     def __post_init__(self):
         super().__post_init__()
+        if self.use_recovery_adaptive_chunking_config:
+            self._apply_recovery_adaptive_chunking_config()
+        else:
+            self.recovery_adaptive_chunking = self.get_recovery_adaptive_chunking_config()
 
         """Input validation (not exhaustive)."""
         # if not self.vision_backbone.startswith("resnet"):
@@ -280,6 +295,10 @@ class ACTConfig(PreTrainedConfig):
                 raise ValueError("`history_conv_dilations` cannot be empty.")
             if self.recovery_token_pos_embed != "learned":
                 raise ValueError("Only `recovery_token_pos_embed='learned'` is currently supported.")
+            if not self.robot_state_feature:
+                raise ValueError(
+                    "`observation.state` is required when recovery history token is enabled."
+                )
         if self.use_key_history_token:
             if self.key_history_len <= 0:
                 raise ValueError("`key_history_len` must be positive when key history token is enabled.")
@@ -325,6 +344,7 @@ class ACTConfig(PreTrainedConfig):
                 raise ValueError("`adaptive_action_chunking.debug_print_every` must be positive.")
             if aac.debug_print_num_actions < 0 or aac.debug_print_action_dims < 0:
                 raise ValueError("Adaptive chunk debug preview sizes cannot be negative.")
+        self.recovery_adaptive_chunking.validate()
 
     def get_optimizer_preset(self) -> AdamWConfig:
         return AdamWConfig(
@@ -371,6 +391,26 @@ class ACTConfig(PreTrainedConfig):
             event_loss_weight=self.key_history_event_loss_weight,
             token_pos_embed=self.key_history_token_pos_embed,
         )
+
+    def get_recovery_adaptive_chunking_config(self) -> RecoveryAdaptiveChunkingConfig:
+        return RecoveryAdaptiveChunkingConfig.from_legacy_config(self)
+
+    def _apply_recovery_adaptive_chunking_config(self) -> None:
+        rac = self.recovery_adaptive_chunking
+        self.use_recovery_history_token = rac.enabled and rac.use_recovery_token
+        self.use_adaptive_action_chunking = rac.enabled and rac.use_adaptive_action_chunking
+
+        self.history_len = rac.history_len
+        self.history_num_segments = rac.num_segments
+        self.history_hidden_dim = rac.hidden_dim
+        self.history_conv_kernel_size = rac.conv_kernel_size
+        self.history_conv_dilations = list(rac.conv_dilations)
+        self.history_dropout = rac.dropout
+        self.use_action_state_error = rac.use_action_state_error
+        self.history_action_loss_weight = rac.action_loss_weight
+        self.event_prior_loss_weight = rac.event_prior_loss_weight
+        self.recovery_token_pos_embed = rac.token_pos_embed
+        self.adaptive_action_chunking = rac.adaptive_action_chunking
 
     @property
     def observation_delta_indices(self) -> None:
