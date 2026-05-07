@@ -179,8 +179,9 @@ class ACTConfig(PreTrainedConfig):
     use_segment_understanding: bool = False
     seg_config: SegmentUnderstandingConfig = field(default_factory=SegmentUnderstandingConfig)
 
-    # Inference-only history-aware Adaptive Action Chunking.
+    # 是否启用推理阶段的历史感知自适应动作块。False 时保持原始 ACT 固定执行长度。
     use_adaptive_action_chunking: bool = True
+    # 自适应动作块的详细配置，包括 chunk 长度阈值、历史状态阈值、动态加权和调试输出。
     adaptive_action_chunking: AdaptiveActionChunkingConfig = field(
         default_factory=AdaptiveActionChunkingConfig
     )
