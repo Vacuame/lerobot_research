@@ -150,7 +150,53 @@ def test_recovery_score_loss_is_finite():
     assert target_info["target"].shape == (B,)
 
 
+def test_integrated_model_and_controller_shapes():
+    RecoveryAdaptiveChunkingConfig, modeling = _load_recovery_adaptive_classes()
+    cfg = RecoveryAdaptiveChunkingConfig(
+        history_len=8,
+        num_segments=2,
+        hidden_dim=16,
+        conv_dilations=[1, 2],
+        recovery_score_target_center=0.5,
+        recovery_score_target_temperature=0.2,
+        min_chunk_size=2,
+        max_chunk_size=8,
+    )
+
+    model = modeling.RecoveryAdaptiveChunkingModel(
+        state_dim=3,
+        action_dim=3,
+        dim_model=32,
+        config=cfg,
+    )
+    state_history = torch.randn(2, 8, 3)
+    action_history = torch.randn(2, 8, 3)
+    current_state = state_history[:, -1]
+    history_mask = torch.ones(2, 8, dtype=torch.bool)
+
+    tokens, aux_outputs = model(
+        state_history=state_history,
+        action_history=action_history,
+        current_state=current_state,
+        history_mask=history_mask,
+    )
+
+    assert tokens.shape == (2, 2, 32)
+    assert model.token_pos_embed.shape == (2, 32)
+    assert aux_outputs["recovery_score"].shape == (2, 1)
+
+    controller = modeling.RecoveryAdaptiveChunkingController(
+        cfg,
+        policy_chunk_size=8,
+        policy_n_action_steps=8,
+    )
+    decision = controller.decide(torch.randn(1, 8, 3), recovery_score=0.9)
+    assert 2 <= decision.chunk_size <= 8
+    assert decision.recovery_score == 0.9
+
+
 if __name__ == "__main__":
     test_future_action_correction_increases_recovery_target()
     test_recovery_score_loss_is_finite()
+    test_integrated_model_and_controller_shapes()
     print("Recovery adaptive chunking tests passed.")

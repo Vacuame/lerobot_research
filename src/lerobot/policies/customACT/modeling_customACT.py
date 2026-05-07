@@ -48,10 +48,10 @@ from lerobot.utils.constants import (
 )
 #新增：自己的import
 from lerobot.policies.customACT.history_obs_state.modeling_history_obs import HistoryObsStateEmbedding
-from lerobot.policies.customACT.history_obs_state.embedding_conv1d_history_obs import RecoveryHistoryTokenEncoder
 from lerobot.policies.customACT.key_history_state.modeling_key_history import KeyHistoryTokenEncoder
 from lerobot.policies.customACT.recovery_adaptive_chunking import (
-    AdaptiveActionChunkingController,
+    RecoveryAdaptiveChunkingController,
+    RecoveryAdaptiveChunkingModel,
     compute_recovery_score_loss,
 )
 from lerobot.policies.dino_act.backbone_res import ResNet18Backbone, get_custom_backbone
@@ -96,8 +96,8 @@ class ACTPolicy(PreTrainedPolicy):
 
         self.adaptive_action_chunker = None
         if config.use_adaptive_action_chunking:
-            self.adaptive_action_chunker = AdaptiveActionChunkingController(
-                config.recovery_adaptive_chunking.adaptive_action_chunking,
+            self.adaptive_action_chunker = RecoveryAdaptiveChunkingController(
+                config.recovery_adaptive_chunking,
                 policy_chunk_size=config.chunk_size,
                 policy_n_action_steps=(
                     config.chunk_size if config.temporal_ensemble_coeff is not None else config.n_action_steps
@@ -809,20 +809,11 @@ class ACT(nn.Module):
 
         recovery_adaptive_cfg = self.config.recovery_adaptive_chunking
         if recovery_adaptive_cfg.use_recovery_token:
-            self.recovery_history_encoder = RecoveryHistoryTokenEncoder(
+            self.recovery_adaptive_chunking_model = RecoveryAdaptiveChunkingModel(
                 state_dim=self.config.robot_state_feature.shape[0],
                 action_dim=self.config.action_feature.shape[0],
                 dim_model=config.dim_model,
-                history_len=recovery_adaptive_cfg.history_len,
-                history_num_segments=recovery_adaptive_cfg.num_segments,
-                history_hidden_dim=recovery_adaptive_cfg.hidden_dim,
-                history_conv_kernel_size=recovery_adaptive_cfg.conv_kernel_size,
-                history_conv_dilations=recovery_adaptive_cfg.conv_dilations,
-                history_dropout=recovery_adaptive_cfg.dropout,
-                use_action_state_error=recovery_adaptive_cfg.use_action_state_error,
-            )
-            self.recovery_token_pos_embed = nn.Parameter(
-                torch.zeros(recovery_adaptive_cfg.num_segments, config.dim_model)
+                config=recovery_adaptive_cfg,
             )
             self.recovery_aux_outputs = None
 
@@ -1063,7 +1054,7 @@ class ACT(nn.Module):
             missing = [key for key in (OBS_STATE_HISTORY, ACTION_HISTORY, HISTORY_MASK) if key not in batch]
             if missing:
                 raise KeyError(f"Missing recovery history batch keys: {missing}")
-            recovery_tokens, self.recovery_aux_outputs = self.recovery_history_encoder(
+            recovery_tokens, self.recovery_aux_outputs = self.recovery_adaptive_chunking_model(
                 state_history=batch[OBS_STATE_HISTORY],
                 action_history=batch[ACTION_HISTORY],
                 current_state=batch[OBS_STATE],
@@ -1071,7 +1062,7 @@ class ACT(nn.Module):
             )
             recovery_tokens = recovery_tokens.permute(1, 0, 2)  # [history_num_segments, B, D]
             encoder_in_tokens.extend(list(recovery_tokens))
-            encoder_in_pos_embed.extend(list(self.recovery_token_pos_embed.unsqueeze(1)))
+            encoder_in_pos_embed.extend(list(self.recovery_adaptive_chunking_model.token_pos_embed.unsqueeze(1)))
 
         if self.config.use_key_history_token:
             missing = [key for key in (OBS_STATE_HISTORY, HISTORY_MASK) if key not in batch]

@@ -1,15 +1,22 @@
 from .configuration_recovery_adaptive_chunking import RecoveryAdaptiveChunkingConfig
 from .modeling_recovery_adaptive_chunking import (
-    AdaptiveActionChunkingController,
     AdaptiveActionChunkingDecision,
+    CausalConv1d,
+    RecoveryAdaptiveChunkingController,
+    RecoveryAdaptiveChunkingModel,
     compute_recovery_score_loss,
     compute_recovery_score_target,
 )
 
+AdaptiveActionChunkingController = RecoveryAdaptiveChunkingController
+
 __all__ = [
     "AdaptiveActionChunkingController",
     "AdaptiveActionChunkingDecision",
+    "CausalConv1d",
     "RecoveryAdaptiveChunkingConfig",
+    "RecoveryAdaptiveChunkingController",
+    "RecoveryAdaptiveChunkingModel",
     "compute_recovery_score_loss",
     "compute_recovery_score_target",
 ]

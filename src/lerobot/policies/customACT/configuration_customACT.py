@@ -95,8 +95,8 @@ class ACTConfig(PreTrainedConfig):
         kl_weight: The weight to use for the KL-divergence component of the loss if the variational objective
             is enabled. Loss is then calculated as: `reconstruction_loss + kl_weight * kld_loss`.
     """
- # —————————————————————————————————————————————————————————————————————————————————————
-
+ # —————————————————————————————————————————————————————————————————————————————————————————————————————————————————————————————————————————
+    # 历史状态序列
     # 自定义历史信息参数。
     # 注意：如果你要开关历史模块，建议只改这个配置文件，不要在训练命令里覆盖这些参数。
 
@@ -127,12 +127,12 @@ class ACTConfig(PreTrainedConfig):
 
 
 
-# —————————————————————————————————————————————————————————————————————————————————————
+# —————————————————————————————————————————————————————————————————————————————————————————————————————————————————————————————————————————
     # 是否启用新的“失败感知本体历史 Recovery Token 模块”。
     # False：完全走原始 ACT 路径，不需要历史 state/action 字段。
     # True：训练时数据集自动构造 observation.state.history、action.history、history_mask；
     #       推理时 policy 内部维护 state/action 历史 buffer。
-    use_recovery_history_token: bool = True
+    use_recovery_history_token: bool = False
     # Recovery 模块使用的历史窗口长度 H。
     # state.history = [s_{t-H+1}, ..., s_t]，action.history = [a_{t-H}, ..., a_{t-1}]。
     history_len: int = 64
@@ -159,6 +159,10 @@ class ACTConfig(PreTrainedConfig):
     # Recovery tokens 的位置编码类型。目前只实现 "learned"，即每个 recovery segment 一个可学习位置向量。
     recovery_token_pos_embed: str = "learned"
 
+
+
+# —————————————————————————————————————————————————————————————————————————————————————————————————————————————————————————————————————————
+    # 关键帧历史状态 Token 模块（No-failure Key History Token Module）。
     # Event-guided key historical state token module.
     # This no-failure history module only uses observation.state.history and history_mask.
     # It does not use action.history, execution error, failure labels, or recovery scores.
@@ -174,7 +178,7 @@ class ACTConfig(PreTrainedConfig):
     key_history_action_loss_weight: float = 0.05
     key_history_event_loss_weight: float = 0.01
     key_history_token_pos_embed: str = "learned"
-    # —————————————————————————————————————————————————————————————————————————————————————
+    # —————————————————————————————————————————————————————————————————————————————————————————————————————————————————————————————————————————
 
 
 
@@ -182,12 +186,22 @@ class ACTConfig(PreTrainedConfig):
     use_segment_understanding: bool = False
     seg_config: SegmentUnderstandingConfig = field(default_factory=SegmentUnderstandingConfig)
 
+
+
+# —————————————————————————————————————————————————————————————————————————————————————————————————————————————————————————————————————————
+    # 自适应动作块配置（Adaptive Action Chunking Config）。
     # 是否启用推理阶段的历史感知自适应动作块。False 时保持原始 ACT 固定执行长度。
-    use_adaptive_action_chunking: bool = True
+    use_adaptive_action_chunking: bool = False
     # 自适应动作块的详细配置，包括 chunk 长度阈值、历史状态阈值、动态加权和调试输出。
     adaptive_action_chunking: AdaptiveActionChunkingConfig = field(
         default_factory=AdaptiveActionChunkingConfig
     )
+
+
+
+
+# —————————————————————————————————————————————————————————————————————————————————————————————————————————————————————————————————————————
+    # recovery_token+自适应动作块统一配置。
     # Unified config for the recovery token, recovery score pseudo-label, and adaptive chunk controller.
     # Existing top-level fields remain supported; __post_init__ syncs them into this nested config.
     recovery_adaptive_chunking: RecoveryAdaptiveChunkingConfig = field(
@@ -195,7 +209,14 @@ class ACTConfig(PreTrainedConfig):
     )
     # False keeps legacy top-level fields as the source of truth. Set True for new
     # experiments that configure recovery token + AAC only through the nested config.
-    use_recovery_adaptive_chunking_config: bool = False
+    use_recovery_adaptive_chunking_config: bool = True
+
+
+# —————————————————————————————————————————————————————————————————————————————————————————————————————————————————————————————————————————
+
+
+
+
 
     # Input / output structure.
     n_obs_steps: int = 1
@@ -295,10 +316,6 @@ class ACTConfig(PreTrainedConfig):
                 raise ValueError("`history_conv_dilations` cannot be empty.")
             if self.recovery_token_pos_embed != "learned":
                 raise ValueError("Only `recovery_token_pos_embed='learned'` is currently supported.")
-            if not self.robot_state_feature:
-                raise ValueError(
-                    "`observation.state` is required when recovery history token is enabled."
-                )
         if self.use_key_history_token:
             if self.key_history_len <= 0:
                 raise ValueError("`key_history_len` must be positive when key history token is enabled.")
@@ -358,6 +375,8 @@ class ACTConfig(PreTrainedConfig):
     def validate_features(self) -> None:
         if not self.image_features and not self.env_state_feature:
             raise ValueError("You must provide at least one image or the environment state among the inputs.")
+        if self.use_recovery_history_token and not self.robot_state_feature:
+            raise ValueError("`observation.state` is required when recovery history token is enabled.")
 
     def get_HistoryObsConfig(self) -> HistoryObsConfig:
         if self.ho_type == 'lstm':
@@ -410,7 +429,32 @@ class ACTConfig(PreTrainedConfig):
         self.history_action_loss_weight = rac.action_loss_weight
         self.event_prior_loss_weight = rac.event_prior_loss_weight
         self.recovery_token_pos_embed = rac.token_pos_embed
-        self.adaptive_action_chunking = rac.adaptive_action_chunking
+        for name in (
+            "state_history_len",
+            "min_chunk_size",
+            "max_chunk_size",
+            "stable_chunk_multiplier",
+            "unstable_chunk_multiplier",
+            "chunk_smoothing",
+            "max_chunk_delta",
+            "volatility_low",
+            "volatility_high",
+            "acceleration_high",
+            "recovery_score_high",
+            "action_uncertainty_low",
+            "action_uncertainty_high",
+            "action_curvature_weight",
+            "stable_old_action_weight",
+            "nominal_old_action_weight",
+            "unstable_old_action_weight",
+            "min_old_action_weight",
+            "max_old_action_weight",
+            "debug_print_chunks",
+            "debug_print_every",
+            "debug_print_num_actions",
+            "debug_print_action_dims",
+        ):
+            setattr(self.adaptive_action_chunking, name, getattr(rac, name))
 
     @property
     def observation_delta_indices(self) -> None:

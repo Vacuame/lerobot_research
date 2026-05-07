@@ -4,10 +4,6 @@ from copy import deepcopy
 from dataclasses import dataclass, field
 from typing import Any
 
-from lerobot.policies.customACT.adaptive_action_chunking.configuration_adaptive_action_chunking import (
-    AdaptiveActionChunkingConfig,
-)
-
 
 @dataclass
 class RecoveryAdaptiveChunkingConfig:
@@ -49,9 +45,29 @@ class RecoveryAdaptiveChunkingConfig:
     recovery_future_action_curvature_weight: float = 0.5
 
     # Inference-time adaptive action chunking.
-    adaptive_action_chunking: AdaptiveActionChunkingConfig = field(
-        default_factory=AdaptiveActionChunkingConfig
-    )
+    state_history_len: int = 64
+    min_chunk_size: int = 8
+    max_chunk_size: int = 0
+    stable_chunk_multiplier: float = 1.5
+    unstable_chunk_multiplier: float = 0.5
+    chunk_smoothing: float = 0.35
+    max_chunk_delta: int = 16
+    volatility_low: float = 0.03
+    volatility_high: float = 0.12
+    acceleration_high: float = 0.10
+    recovery_score_high: float = 0.65
+    action_uncertainty_low: float = 0.03
+    action_uncertainty_high: float = 0.15
+    action_curvature_weight: float = 0.5
+    stable_old_action_weight: float = 0.65
+    nominal_old_action_weight: float = 0.35
+    unstable_old_action_weight: float = 0.05
+    min_old_action_weight: float = 0.0
+    max_old_action_weight: float = 0.9
+    debug_print_chunks: bool = True
+    debug_print_every: int = 1
+    debug_print_num_actions: int = 3
+    debug_print_action_dims: int = 6
 
     @classmethod
     def from_legacy_config(cls, cfg: Any) -> "RecoveryAdaptiveChunkingConfig":
@@ -90,9 +106,35 @@ class RecoveryAdaptiveChunkingConfig:
         unified.event_prior_loss_weight = float(
             getattr(cfg, "event_prior_loss_weight", unified.event_prior_loss_weight)
         )
-        unified.adaptive_action_chunking = deepcopy(
-            getattr(cfg, "adaptive_action_chunking", unified.adaptive_action_chunking)
-        )
+        legacy_aac = getattr(cfg, "adaptive_action_chunking", None)
+        if legacy_aac is not None:
+            for name in (
+                "state_history_len",
+                "min_chunk_size",
+                "max_chunk_size",
+                "stable_chunk_multiplier",
+                "unstable_chunk_multiplier",
+                "chunk_smoothing",
+                "max_chunk_delta",
+                "volatility_low",
+                "volatility_high",
+                "acceleration_high",
+                "recovery_score_high",
+                "action_uncertainty_low",
+                "action_uncertainty_high",
+                "action_curvature_weight",
+                "stable_old_action_weight",
+                "nominal_old_action_weight",
+                "unstable_old_action_weight",
+                "min_old_action_weight",
+                "max_old_action_weight",
+                "debug_print_chunks",
+                "debug_print_every",
+                "debug_print_num_actions",
+                "debug_print_action_dims",
+            ):
+                if hasattr(legacy_aac, name):
+                    setattr(unified, name, deepcopy(getattr(legacy_aac, name)))
         return unified
 
     def validate(self) -> None:
@@ -129,26 +171,25 @@ class RecoveryAdaptiveChunkingConfig:
                 raise ValueError("Recovery score target weights cannot be negative.")
 
         if self.use_adaptive_action_chunking:
-            aac = self.adaptive_action_chunking
-            if aac.state_history_len < 2:
+            if self.state_history_len < 2:
                 raise ValueError("`adaptive_action_chunking.state_history_len` must be >= 2.")
-            if aac.min_chunk_size <= 0:
+            if self.min_chunk_size <= 0:
                 raise ValueError("`adaptive_action_chunking.min_chunk_size` must be positive.")
-            if aac.max_chunk_size < 0:
+            if self.max_chunk_size < 0:
                 raise ValueError("`adaptive_action_chunking.max_chunk_size` cannot be negative.")
-            if aac.max_chunk_size and aac.max_chunk_size < aac.min_chunk_size:
+            if self.max_chunk_size and self.max_chunk_size < self.min_chunk_size:
                 raise ValueError("`adaptive_action_chunking.max_chunk_size` must be >= min_chunk_size.")
-            if aac.stable_chunk_multiplier <= 0 or aac.unstable_chunk_multiplier <= 0:
+            if self.stable_chunk_multiplier <= 0 or self.unstable_chunk_multiplier <= 0:
                 raise ValueError("Adaptive chunk multipliers must be positive.")
-            if aac.volatility_low < 0 or aac.volatility_high < 0 or aac.acceleration_high < 0:
+            if self.volatility_low < 0 or self.volatility_high < 0 or self.acceleration_high < 0:
                 raise ValueError("Adaptive chunk motion thresholds cannot be negative.")
-            if aac.volatility_low > aac.volatility_high:
+            if self.volatility_low > self.volatility_high:
                 raise ValueError("`adaptive_action_chunking.volatility_low` must be <= volatility_high.")
-            if aac.action_uncertainty_low < 0 or aac.action_uncertainty_high < 0:
+            if self.action_uncertainty_low < 0 or self.action_uncertainty_high < 0:
                 raise ValueError("Adaptive chunk action uncertainty thresholds cannot be negative.")
-            if aac.action_uncertainty_low > aac.action_uncertainty_high:
+            if self.action_uncertainty_low > self.action_uncertainty_high:
                 raise ValueError("`adaptive_action_chunking.action_uncertainty_low` must be <= high.")
-            if aac.debug_print_every <= 0:
+            if self.debug_print_every <= 0:
                 raise ValueError("`adaptive_action_chunking.debug_print_every` must be positive.")
-            if aac.debug_print_num_actions < 0 or aac.debug_print_action_dims < 0:
+            if self.debug_print_num_actions < 0 or self.debug_print_action_dims < 0:
                 raise ValueError("Adaptive chunk debug preview sizes cannot be negative.")
