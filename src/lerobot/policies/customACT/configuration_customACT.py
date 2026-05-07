@@ -20,11 +20,12 @@ from lerobot.configs.types import NormalizationMode
 from lerobot.optim.optimizers import AdamWConfig
 from lerobot.policies.customACT.history_obs_state.configuration_history_obs import HistoryObsConfig, HistoryLSTMConfig, HistoryConv1dConfig
 from lerobot.policies.customACT.key_history_state.configuration_key_history import KeyHistoryTokenConfig
-from lerobot.policies.customACT.adaptive_action_chunking.configuration_adaptive_action_chunking import AdaptiveActionChunkingConfig
 from lerobot.policies.customACT.recovery_adaptive_chunking.configuration_recovery_adaptive_chunking import (
     RecoveryAdaptiveChunkingConfig,
 )
 from lerobot.policies.customACT.segment_understanding.configuration_segment_understanding import SegmentUnderstandingConfig
+
+AdaptiveActionChunkingConfig = RecoveryAdaptiveChunkingConfig
 
 @PreTrainedConfig.register_subclass("customACT")
 @dataclass

@@ -29,34 +29,6 @@ def _load_recovery_adaptive_classes():
         pkg.__path__ = []
         sys.modules[name] = pkg
 
-    adaptive_pkg = types.ModuleType("lerobot.policies.customACT.adaptive_action_chunking")
-    adaptive_pkg.__path__ = []
-
-    class AdaptiveActionChunkingConfig:
-        state_history_len = 64
-        min_chunk_size = 8
-        max_chunk_size = 0
-        stable_chunk_multiplier = 1.5
-        unstable_chunk_multiplier = 0.5
-        volatility_low = 0.03
-        volatility_high = 0.12
-        acceleration_high = 0.10
-        action_uncertainty_low = 0.03
-        action_uncertainty_high = 0.15
-        debug_print_every = 1
-        debug_print_num_actions = 3
-        debug_print_action_dims = 6
-
-    adaptive_pkg.AdaptiveActionChunkingConfig = AdaptiveActionChunkingConfig
-    adaptive_pkg.AdaptiveActionChunkingController = object
-    adaptive_pkg.AdaptiveActionChunkingDecision = object
-    sys.modules[adaptive_pkg.__name__] = adaptive_pkg
-    adaptive_config_module = types.ModuleType(
-        "lerobot.policies.customACT.adaptive_action_chunking.configuration_adaptive_action_chunking"
-    )
-    adaptive_config_module.AdaptiveActionChunkingConfig = AdaptiveActionChunkingConfig
-    sys.modules[adaptive_config_module.__name__] = adaptive_config_module
-
     config_name = (
         "lerobot.policies.customACT.recovery_adaptive_chunking."
         "configuration_recovery_adaptive_chunking"

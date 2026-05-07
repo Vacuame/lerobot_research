@@ -12,32 +12,45 @@ repo_root = Path(__file__).resolve().parents[2]
 
 
 def _load_adaptive_action_chunking_classes():
-    package_name = "adaptive_action_chunking_test_pkg"
-    package = types.ModuleType(package_name)
-    package.__path__ = []
-    sys.modules[package_name] = package
-
     module_dir = (
         repo_root
         / "src"
         / "lerobot"
         / "policies"
         / "customACT"
-        / "adaptive_action_chunking"
+        / "recovery_adaptive_chunking"
     )
 
+    for name in [
+        "lerobot",
+        "lerobot.policies",
+        "lerobot.policies.customACT",
+        "lerobot.policies.customACT.recovery_adaptive_chunking",
+    ]:
+        package = types.ModuleType(name)
+        package.__path__ = []
+        sys.modules[name] = package
+
+    config_name = (
+        "lerobot.policies.customACT.recovery_adaptive_chunking."
+        "configuration_recovery_adaptive_chunking"
+    )
     config_spec = importlib.util.spec_from_file_location(
-        f"{package_name}.configuration_adaptive_action_chunking",
-        module_dir / "configuration_adaptive_action_chunking.py",
+        config_name,
+        module_dir / "configuration_recovery_adaptive_chunking.py",
     )
     config_module = importlib.util.module_from_spec(config_spec)
     assert config_spec is not None and config_spec.loader is not None
     sys.modules[config_spec.name] = config_module
     config_spec.loader.exec_module(config_module)
 
+    modeling_name = (
+        "lerobot.policies.customACT.recovery_adaptive_chunking."
+        "modeling_recovery_adaptive_chunking"
+    )
     modeling_spec = importlib.util.spec_from_file_location(
-        f"{package_name}.modeling_adaptive_action_chunking",
-        module_dir / "modeling_adaptive_action_chunking.py",
+        modeling_name,
+        module_dir / "modeling_recovery_adaptive_chunking.py",
     )
     modeling_module = importlib.util.module_from_spec(modeling_spec)
     assert modeling_spec is not None and modeling_spec.loader is not None
@@ -45,8 +58,8 @@ def _load_adaptive_action_chunking_classes():
     modeling_spec.loader.exec_module(modeling_module)
 
     return (
-        config_module.AdaptiveActionChunkingConfig,
-        modeling_module.AdaptiveActionChunkingController,
+        config_module.RecoveryAdaptiveChunkingConfig,
+        modeling_module.RecoveryAdaptiveChunkingController,
     )
 
 
