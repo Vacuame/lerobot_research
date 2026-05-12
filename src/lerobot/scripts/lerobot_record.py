@@ -58,9 +58,11 @@ lerobot-record \
 ```
 """
 
+import csv
 import logging
 import time
 from dataclasses import asdict, dataclass, field
+from datetime import datetime
 from pathlib import Path
 from pprint import pformat
 from typing import Any
@@ -80,7 +82,7 @@ from lerobot.datasets.video_utils import VideoEncodingManager
 from lerobot.policies.factory import make_policy, make_pre_post_processors
 from lerobot.policies.pretrained import PreTrainedPolicy
 from lerobot.policies.utils import make_robot_action
-#新增：import
+# custom policy imports
 from lerobot.policies.customACT.configuration_customACT import ACTConfig as CustomACTConfig
 from lerobot.utils.constants import OBS_STATE, HIS_OBS_STATES
 from collections import deque
@@ -117,6 +119,7 @@ from lerobot.teleoperators import (  # noqa: F401
     so101_leader,
 )
 from lerobot.teleoperators.keyboard.teleop_keyboard import KeyboardTeleop
+from lerobot.utils.action_smoothness import ActionSmoothnessTracker, format_action_smoothness
 from lerobot.utils.constants import ACTION, OBS_STR
 from lerobot.utils.control_utils import (
     init_keyboard_listener,
@@ -163,7 +166,7 @@ class DatasetRecordConfig:
     # Add tags to your dataset on the hub.
     tags: list[str] | None = None
     # Number of subprocesses handling the saving of frames as PNG. Set to 0 to use threads only;
-    # set to ≥1 to use subprocesses, each using threads to write images. The best number of processes
+    # set to >=1 to use subprocesses, each using threads to write images. The best number of processes
     # and threads depends on your system. We recommend 4 threads per camera with 0 processes.
     # If fps is unstable, adjust the thread count. If still unstable, try using 1 or more subprocesses.
     num_image_writer_processes: int = 0
@@ -243,12 +246,74 @@ class RecordConfig:
                   ( Rerun Log / Loop Wait )
 """
 
-#新增：滑动窗口 
-#TODO 逻辑还有问题，无法判断是录制还是使用policy
+# Sliding observation window used by custom ACT variants.
+# TODO: clarify whether this should apply to recording-only or policy-control paths.
 obs_window: deque[torch.Tensor] | None = None
 
+STATE_SMOOTHNESS_JOINT_COUNT = 6
+STATE_SMOOTHNESS_JOINT_COLUMNS = [
+    f"joint_{i}_smooth" for i in range(1, STATE_SMOOTHNESS_JOINT_COUNT + 1)
+]
+
+
+def _policy_state_smoothness_enabled(policy: PreTrainedPolicy | None) -> bool:
+    return bool(policy is not None and getattr(policy.config, "compute_state_smoothness", False))
+
+
+def _get_dataset_episode_index(dataset: LeRobotDataset) -> int:
+    episode_buffer = getattr(dataset, "episode_buffer", None)
+    if episode_buffer is not None:
+        episode_index = episode_buffer.get("episode_index")
+        if hasattr(episode_index, "item"):
+            return int(episode_index.item())
+        if episode_index is not None:
+            return int(episode_index)
+    return int(dataset.meta.total_episodes)
+
+
+def _save_action_smoothness_summary(
+    *,
+    dataset: LeRobotDataset | None,
+    tracker: ActionSmoothnessTracker,
+    created_at: str,
+) -> None:
+    if dataset is None:
+        return
+
+    summary = tracker.summary()
+    repo_root = Path(__file__).resolve().parents[3]
+    path = repo_root / "outputs" / "state_smoothness.csv"
+    fieldnames = ["created_at", *STATE_SMOOTHNESS_JOINT_COLUMNS]
+    row = {"created_at": created_at}
+    joint_scores = list(summary.avg_joint_scores.values())[:STATE_SMOOTHNESS_JOINT_COUNT]
+    for i, column in enumerate(STATE_SMOOTHNESS_JOINT_COLUMNS):
+        row[column] = f"{joint_scores[i]:.6f}" if i < len(joint_scores) else ""
+
+    try:
+        if path.exists() and path.stat().st_size > 0:
+            with path.open("r", encoding="utf-8", newline="") as f:
+                existing_header = next(csv.reader(f), [])
+            if existing_header != fieldnames:
+                path = path.with_name("state_smoothness_by_joint.csv")
+
+        path.parent.mkdir(parents=True, exist_ok=True)
+        write_header = not path.exists() or path.stat().st_size == 0
+        with path.open("a", encoding="utf-8", newline="") as f:
+            writer = csv.DictWriter(f, fieldnames=fieldnames)
+            if write_header:
+                writer.writeheader()
+            writer.writerow(row)
+        logging.info(
+            "Saved per-joint state smoothness summary to %s (episode=%s, avg_smoothness=%.2f)",
+            path,
+            _get_dataset_episode_index(dataset),
+            summary.avg_score,
+        )
+    except Exception as e:
+        logging.warning("Failed to save action smoothness summary to %s: %s", path, e)
+
 @safe_stop_image_writer
-def record_loop(    # 录制循环
+def record_loop(    # recording loop
     robot: Robot,
     events: dict,
     fps: int,
@@ -301,102 +366,127 @@ def record_loop(    # 录制循环
 
     timestamp = 0
     start_episode_t = time.perf_counter()
-    while timestamp < control_time_s: # 实际的每一秒循环
-        start_loop_t = time.perf_counter()
+    episode_created_at = datetime.now().astimezone().isoformat(timespec="seconds")
+    smoothness_enabled = _policy_state_smoothness_enabled(policy)
+    smoothness_tracker = ActionSmoothnessTracker() if smoothness_enabled else None
+    try:
+        while timestamp < control_time_s:
+            start_loop_t = time.perf_counter()
 
-        if events["exit_early"]:
-            events["exit_early"] = False
-            break
+            if events["exit_early"]:
+                events["exit_early"] = False
+                break
 
-        # Get robot observation
-        obs = robot.get_observation()
+            # Get robot observation
+            obs = robot.get_observation()
 
-        # Applies a pipeline to the raw robot observation, default is IdentityProcessor
-        obs_processed = robot_observation_processor(obs)
+            # Applies a pipeline to the raw robot observation, default is IdentityProcessor
+            obs_processed = robot_observation_processor(obs)
 
-        #注意：observation_frame会并入frame，最终存入dataset，所以不能直接改
-        if policy is not None or dataset is not None:
-            observation_frame = build_dataset_frame(dataset.features, obs_processed, prefix=OBS_STR)
+            # observation_frame is later merged into the saved dataset frame.
+            if policy is not None or dataset is not None:
+                observation_frame = build_dataset_frame(dataset.features, obs_processed, prefix=OBS_STR)
 
-        #新增：有policy先给它一个frame，本来不用的，这是为了加入滑动窗口
+            # Policy inference gets its own frame so history state can be added.
+            if policy is not None:
+                frame_for_policy = observation_frame.copy()
+            # Add the sliding observation history when configured.
+            if obs_window is not None:
+                cur_obs_state = torch.as_tensor(observation_frame[OBS_STATE],dtype=torch.float32)
+                obs_window.append(cur_obs_state)
+                history_obs_states = torch.stack(list(obs_window), dim=0)
+                history_obs_states = pad_list_left_to_length(history_obs_states, obs_window.maxlen)
+                frame_for_policy[HIS_OBS_STATES] = history_obs_states
+
+            # Policy control
+            if policy is not None and preprocessor is not None and postprocessor is not None:
+                action_values = predict_action(
+                    observation=frame_for_policy,
+                    policy=policy,
+                    device=get_safe_torch_device(policy.config.device),
+                    preprocessor=preprocessor,
+                    postprocessor=postprocessor,
+                    use_amp=policy.config.use_amp,
+                    task=single_task,
+                    robot_type=robot.robot_type,
+                )
+
+                act_processed_policy: RobotAction = make_robot_action(action_values, dataset.features)
+
+            # Teleoperation control
+            elif policy is None and isinstance(teleop, Teleoperator):
+                act = teleop.get_action()
+
+                # Applies a pipeline to the raw teleop action, default is IdentityProcessor
+                act_processed_teleop = teleop_action_processor((act, obs))
+
+            elif policy is None and isinstance(teleop, list):
+                arm_action = teleop_arm.get_action()
+                arm_action = {f"arm_{k}": v for k, v in arm_action.items()}
+                keyboard_action = teleop_keyboard.get_action()
+                base_action = robot._from_keyboard_to_base_action(keyboard_action)
+                act = {**arm_action, **base_action} if len(base_action) > 0 else arm_action
+                act_processed_teleop = teleop_action_processor((act, obs))
+            else:
+                logging.info(
+                    "No policy or teleoperator provided, skipping action generation."
+                    "This is likely to happen when resetting the environment without a teleop device."
+                    "The robot won't be at its rest position at the start of the next episode."
+                )
+                continue
+
+            # Applies a pipeline to the action, default is IdentityProcessor
+            if policy is not None and act_processed_policy is not None:
+                action_values = act_processed_policy
+                robot_action_to_send = robot_action_processor((act_processed_policy, obs))
+            else:
+                action_values = act_processed_teleop
+                robot_action_to_send = robot_action_processor((act_processed_teleop, obs))
+
+            # Send action to robot
+            # Action can eventually be clipped using `max_relative_target`,
+            # so action actually sent is saved in the dataset. action = postprocessor.process(action)
+            # TODO(steven, pepijn, adil): we should use a pipeline step to clip the action, so the sent action is the action that we input to the robot.
+            _sent_action = robot.send_action(robot_action_to_send)
+            if smoothness_tracker is not None:
+                smoothness = smoothness_tracker.update(
+                    _sent_action if isinstance(_sent_action, dict) else robot_action_to_send,
+                    observation=obs,
+                )
+
+            # Write to dataset
+            if dataset is not None:
+                action_frame = build_dataset_frame(dataset.features, action_values, prefix=ACTION)
+                frame = {**observation_frame, **action_frame, "task": single_task}
+                dataset.add_frame(frame)
+
+            if display_data:
+                log_rerun_data(observation=obs_processed, action=action_values)
+
+            dt_s = time.perf_counter() - start_loop_t
+            busy_wait(1 / fps - dt_s)
+            loop_s = time.perf_counter() - start_loop_t
+            if policy is not None:
+                status = f"\rtime: {loop_s * 1e3:.2f}ms ({1 / loop_s:.0f} Hz)"
+                if smoothness_tracker is not None:
+                    status = f"{status} | {format_action_smoothness(smoothness)}"
+                print(status, end="", flush=True)
+
+            timestamp = time.perf_counter() - start_episode_t
+
+    finally:
+        if smoothness_tracker is not None:
+            _save_action_smoothness_summary(
+                dataset=dataset,
+                tracker=smoothness_tracker,
+                created_at=episode_created_at,
+            )
         if policy is not None:
-            frame_for_policy = observation_frame.copy() # 浅拷贝
-        # 如果之前创建了obs_window，这里就会输入进frame_for_policy
-        if obs_window is not None:
-            cur_obs_state = torch.as_tensor(observation_frame[OBS_STATE],dtype=torch.float32)
-            obs_window.append(cur_obs_state)
-            history_obs_states = torch.stack(list(obs_window), dim=0)
-            history_obs_states = pad_list_left_to_length(history_obs_states, obs_window.maxlen)
-            frame_for_policy[HIS_OBS_STATES] = history_obs_states
-
-        # policy操控
-        if policy is not None and preprocessor is not None and postprocessor is not None:
-            action_values = predict_action( # 预测动作
-                observation=frame_for_policy,
-                policy=policy,
-                device=get_safe_torch_device(policy.config.device),
-                preprocessor=preprocessor,
-                postprocessor=postprocessor,
-                use_amp=policy.config.use_amp,
-                task=single_task,
-                robot_type=robot.robot_type,
-            )
-
-            act_processed_policy: RobotAction = make_robot_action(action_values, dataset.features)
-
-        # teleop操控
-        elif policy is None and isinstance(teleop, Teleoperator):
-            act = teleop.get_action()
-
-            # Applies a pipeline to the raw teleop action, default is IdentityProcessor
-            act_processed_teleop = teleop_action_processor((act, obs))
-
-        elif policy is None and isinstance(teleop, list):
-            arm_action = teleop_arm.get_action()
-            arm_action = {f"arm_{k}": v for k, v in arm_action.items()}
-            keyboard_action = teleop_keyboard.get_action()
-            base_action = robot._from_keyboard_to_base_action(keyboard_action)
-            act = {**arm_action, **base_action} if len(base_action) > 0 else arm_action
-            act_processed_teleop = teleop_action_processor((act, obs))
-        else:
-            logging.info(
-                "No policy or teleoperator provided, skipping action generation."
-                "This is likely to happen when resetting the environment without a teleop device."
-                "The robot won't be at its rest position at the start of the next episode."
-            )
-            continue
-
-        # Applies a pipeline to the action, default is IdentityProcessor
-        if policy is not None and act_processed_policy is not None:
-            action_values = act_processed_policy
-            robot_action_to_send = robot_action_processor((act_processed_policy, obs))
-        else:
-            action_values = act_processed_teleop
-            robot_action_to_send = robot_action_processor((act_processed_teleop, obs))
-
-        # Send action to robot
-        # Action can eventually be clipped using `max_relative_target`,
-        # so action actually sent is saved in the dataset. action = postprocessor.process(action)
-        # TODO(steven, pepijn, adil): we should use a pipeline step to clip the action, so the sent action is the action that we input to the robot.
-        _sent_action = robot.send_action(robot_action_to_send)
-
-        # Write to dataset
-        if dataset is not None:
-            action_frame = build_dataset_frame(dataset.features, action_values, prefix=ACTION)
-            frame = {**observation_frame, **action_frame, "task": single_task}
-            dataset.add_frame(frame)
-
-        if display_data:
-            log_rerun_data(observation=obs_processed, action=action_values)
-
-        dt_s = time.perf_counter() - start_loop_t
-        busy_wait(1 / fps - dt_s)
-
-        timestamp = time.perf_counter() - start_episode_t
+            print()
 
 
 @parser.wrap()
-def record(cfg: RecordConfig) -> LeRobotDataset: # 实际开始录制
+def record(cfg: RecordConfig) -> LeRobotDataset:
     init_logging()
     logging.info(pformat(asdict(cfg)))
     if cfg.display_data:
@@ -451,10 +541,10 @@ def record(cfg: RecordConfig) -> LeRobotDataset: # 实际开始录制
         )
 
     # Load pretrained policy
-    policy = None if cfg.policy is None else make_policy(cfg.policy, ds_meta=dataset.meta) # 构建了模型实例
+    policy = None if cfg.policy is None else make_policy(cfg.policy, ds_meta=dataset.meta)
     preprocessor = None
     postprocessor = None
-    if cfg.policy is not None: # 在这里载入了模型数据
+    if cfg.policy is not None:
         preprocessor, postprocessor = make_pre_post_processors(
             policy_cfg=cfg.policy,
             pretrained_path=cfg.policy.pretrained_path,
@@ -465,12 +555,12 @@ def record(cfg: RecordConfig) -> LeRobotDataset: # 实际开始录制
             },
         )
 
-    #新增：特判customACT，创建滑动队列 
+    # Custom ACT can consume a fixed-length history of observation states.
     if policy is not None and isinstance(cfg.policy, CustomACTConfig) and cfg.policy.n_history_obs_states > 0:
         global obs_window
         obs_window = deque(maxlen=cfg.policy.n_history_obs_states)
-    
-    #新增：如果用到了实例分割模块，将预处理传入customACT
+
+    # Segment-aware custom ACT needs access to the policy preprocessor.
     if policy is not None and isinstance(policy, customACT) and isinstance(policy.config, customACTConfig) and policy.config.use_segment_understanding:
         policy.set_preprocessor(preprocessor)
 
@@ -484,7 +574,7 @@ def record(cfg: RecordConfig) -> LeRobotDataset: # 实际开始录制
         recorded_episodes = 0
         while recorded_episodes < cfg.dataset.num_episodes and not events["stop_recording"]:
             log_say(f"Recording episode {dataset.num_episodes}", cfg.play_sounds)
-            record_loop(    # 实际录制一集
+            record_loop(
                 robot=robot,
                 events=events,
                 fps=cfg.dataset.fps,
@@ -507,7 +597,7 @@ def record(cfg: RecordConfig) -> LeRobotDataset: # 实际开始录制
                 (recorded_episodes < cfg.dataset.num_episodes - 1) or events["rerecord_episode"]
             ):
                 log_say("Reset the environment", cfg.play_sounds)
-                record_loop( # 不带dataset，所以不会保存数据
+                record_loop(
                     robot=robot,
                     events=events,
                     fps=cfg.dataset.fps,

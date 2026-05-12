@@ -88,6 +88,7 @@ from lerobot.teleoperators import (  # noqa: F401
     so100_leader,
     so101_leader,
 )
+from lerobot.utils.action_smoothness import ActionSmoothnessTracker, format_action_smoothness
 from lerobot.utils.import_utils import register_third_party_devices
 from lerobot.utils.robot_utils import busy_wait
 from lerobot.utils.utils import init_logging, move_cursor_up
@@ -134,6 +135,7 @@ def teleop_loop(
 
     display_len = max(len(key) for key in robot.action_features)
     start = time.perf_counter()
+    smoothness_tracker = ActionSmoothnessTracker()
 
     while True:
         loop_start = time.perf_counter()
@@ -170,7 +172,11 @@ def teleop_loop(
         # print(result)
 
         # Send processed action to robot (robot_action_processor.to_output should return dict[str, Any])
-        _ = robot.send_action(robot_action_to_send)
+        _sent_action = robot.send_action(robot_action_to_send)
+        smoothness = smoothness_tracker.update(
+            _sent_action if isinstance(_sent_action, dict) else robot_action_to_send,
+            observation=obs,
+        )
 
         if display_data:
             # Process robot observation through pipeline
@@ -186,12 +192,15 @@ def teleop_loop(
             # Display the final robot action that was sent
             for motor, value in robot_action_to_send.items():
                 print(f"{motor:<{display_len}} | {value:>7.2f}")
-            move_cursor_up(len(robot_action_to_send) + 5)
+            print(f"{'smooth':<{display_len}} | {smoothness.score:>7.1f}")
+            print(f"{'d_rms':<{display_len}} | {smoothness.delta_rms:>7.3f}")
+            print(f"{'a_rms':<{display_len}} | {smoothness.accel_rms:>7.3f}")
+            move_cursor_up(len(robot_action_to_send) + 8)
 
         dt_s = time.perf_counter() - loop_start
         busy_wait(1 / fps - dt_s)
         loop_s = time.perf_counter() - loop_start
-        print(f"\ntime: {loop_s * 1e3:.2f}ms ({1 / loop_s:.0f} Hz)")
+        print(f"\ntime: {loop_s * 1e3:.2f}ms ({1 / loop_s:.0f} Hz) | {format_action_smoothness(smoothness)}")
 
         if duration is not None and time.perf_counter() - start >= duration:
             return

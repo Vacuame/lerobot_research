@@ -96,6 +96,21 @@ class ACTConfig(PreTrainedConfig):
         kl_weight: The weight to use for the KL-divergence component of the loss if the variational objective
             is enabled. Loss is then calculated as: `reconstruction_loss + kl_weight * kld_loss`.
     """
+# —————————————————————————————————————————————————————————————————————————————————————————————————————————————————————————————————————————
+    # recovery_token+自适应动作块统一配置。
+    # Unified config for the recovery token, recovery score pseudo-label, and adaptive chunk controller.
+    # Existing top-level fields remain supported; __post_init__ syncs them into this nested config.
+    recovery_adaptive_chunking: RecoveryAdaptiveChunkingConfig = field(
+        default_factory=RecoveryAdaptiveChunkingConfig
+    )
+    # False keeps legacy top-level fields as the source of truth. Set True for new
+    # experiments that configure recovery token + AAC only through the nested config.
+    use_recovery_adaptive_chunking_config: bool = False
+
+    # 是否开启计算状态平滑度指标（state smoothness），用于评估动作块内状态变化的平滑程度。这个指标可以帮助分析自适应动作块的效果，尤其是在运动突变发生时状态的变化情况。
+    compute_state_smoothness: bool = False
+
+
  # —————————————————————————————————————————————————————————————————————————————————————————————————————————————————————————————————————————
     # 历史状态序列
     # 自定义历史信息参数。
@@ -202,18 +217,7 @@ class ACTConfig(PreTrainedConfig):
 
 
 # —————————————————————————————————————————————————————————————————————————————————————————————————————————————————————————————————————————
-    # recovery_token+自适应动作块统一配置。
-    # Unified config for the recovery token, recovery score pseudo-label, and adaptive chunk controller.
-    # Existing top-level fields remain supported; __post_init__ syncs them into this nested config.
-    recovery_adaptive_chunking: RecoveryAdaptiveChunkingConfig = field(
-        default_factory=RecoveryAdaptiveChunkingConfig
-    )
-    # False keeps legacy top-level fields as the source of truth. Set True for new
-    # experiments that configure recovery token + AAC only through the nested config.
-    use_recovery_adaptive_chunking_config: bool = True
 
-
-# —————————————————————————————————————————————————————————————————————————————————————————————————————————————————————————————————————————
 
 
 
@@ -261,6 +265,8 @@ class ACTConfig(PreTrainedConfig):
     # Inference.
     # Note: the value used in ACT when temporal ensembling is enabled is 0.01.
     temporal_ensemble_coeff: float | None = None
+
+
 
     # Training and loss computation.
     dropout: float = 0.1
