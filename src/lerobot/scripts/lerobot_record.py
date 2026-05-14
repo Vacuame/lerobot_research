@@ -59,10 +59,14 @@ lerobot-record \
 """
 
 import csv
+import math
+import re
 import logging
 import time
+import zipfile
 from dataclasses import asdict, dataclass, field
 from datetime import datetime
+from html import escape
 from pathlib import Path
 from pprint import pformat
 from typing import Any
@@ -255,6 +259,8 @@ STATE_SMOOTHNESS_JOINT_COLUMNS = [
     f"joint_{i}_smooth" for i in range(1, STATE_SMOOTHNESS_JOINT_COUNT + 1)
 ]
 
+EXCEL_SHEET_NAME_MAX_LEN = 31
+
 
 def _policy_state_smoothness_enabled(policy: PreTrainedPolicy | None) -> bool:
     return bool(policy is not None and getattr(policy.config, "compute_state_smoothness", False))
@@ -312,6 +318,195 @@ def _save_action_smoothness_summary(
     except Exception as e:
         logging.warning("Failed to save action smoothness summary to %s: %s", path, e)
 
+
+def _get_state_joint_names(dataset: LeRobotDataset | None) -> list[str]:
+    if dataset is None:
+        return []
+
+    state_feature = dataset.features.get(OBS_STATE)
+    if state_feature is None:
+        return []
+    return list(state_feature.get("names") or [])
+
+
+def _state_values_to_row(state_values: Any, expected_len: int) -> list[Any]:
+    if hasattr(state_values, "detach"):
+        state_values = state_values.detach().cpu()
+    if hasattr(state_values, "tolist"):
+        state_values = state_values.tolist()
+
+    if isinstance(state_values, list):
+        values = state_values
+    elif isinstance(state_values, tuple):
+        values = list(state_values)
+    else:
+        try:
+            values = list(state_values)
+        except TypeError:
+            values = [state_values]
+    if len(values) < expected_len:
+        values.extend([""] * (expected_len - len(values)))
+    return values[:expected_len]
+
+
+def _save_record_state_workbook(
+    *,
+    record_name: str,
+    joint_names: list[str],
+    state_rows: list[list[Any]],
+) -> None:
+    if not joint_names:
+        return
+
+    repo_root = Path(__file__).resolve().parents[3]
+    output_dir = repo_root / "output"
+    output_dir.mkdir(parents=True, exist_ok=True)
+    path = _get_unique_xlsx_path(output_dir / f"{record_name}.xlsx")
+    sheet_name = _sanitize_excel_sheet_name(record_name)
+
+    try:
+        _write_simple_xlsx(path, sheet_name, joint_names, state_rows)
+        logging.info("Saved record joint states to %s (%s frames)", path, len(state_rows))
+    except Exception as e:
+        logging.warning("Failed to save record joint states to %s: %s", path, e)
+
+
+def _get_unique_xlsx_path(path: Path) -> Path:
+    if not path.exists():
+        return path
+
+    stem = path.stem
+    suffix = path.suffix
+    for i in range(1, 10000):
+        candidate = path.with_name(f"{stem}_{i}{suffix}")
+        if not candidate.exists():
+            return candidate
+    raise RuntimeError(f"Could not create a unique Excel path for {path}")
+
+
+def _sanitize_excel_sheet_name(name: str) -> str:
+    sanitized = re.sub(r"[\[\]:*?/\\]", "_", name).strip("'")
+    sanitized = sanitized[:EXCEL_SHEET_NAME_MAX_LEN]
+    return sanitized or "record"
+
+
+def _write_simple_xlsx(path: Path, sheet_name: str, headers: list[str], rows: list[list[Any]]) -> None:
+    sheet_xml = _build_sheet_xml(headers, rows)
+    workbook_xml = (
+        '<?xml version="1.0" encoding="UTF-8" standalone="yes"?>'
+        '<workbook xmlns="http://schemas.openxmlformats.org/spreadsheetml/2006/main" '
+        'xmlns:r="http://schemas.openxmlformats.org/officeDocument/2006/relationships">'
+        "<sheets>"
+        f'<sheet name="{escape(sheet_name)}" sheetId="1" r:id="rId1"/>'
+        "</sheets>"
+        "</workbook>"
+    )
+    content_types_xml = (
+        '<?xml version="1.0" encoding="UTF-8" standalone="yes"?>'
+        '<Types xmlns="http://schemas.openxmlformats.org/package/2006/content-types">'
+        '<Default Extension="rels" ContentType="application/vnd.openxmlformats-package.relationships+xml"/>'
+        '<Default Extension="xml" ContentType="application/xml"/>'
+        '<Override PartName="/xl/workbook.xml" '
+        'ContentType="application/vnd.openxmlformats-officedocument.spreadsheetml.sheet.main+xml"/>'
+        '<Override PartName="/xl/worksheets/sheet1.xml" '
+        'ContentType="application/vnd.openxmlformats-officedocument.spreadsheetml.worksheet+xml"/>'
+        '<Override PartName="/xl/styles.xml" '
+        'ContentType="application/vnd.openxmlformats-officedocument.spreadsheetml.styles+xml"/>'
+        "</Types>"
+    )
+    root_rels_xml = (
+        '<?xml version="1.0" encoding="UTF-8" standalone="yes"?>'
+        '<Relationships xmlns="http://schemas.openxmlformats.org/package/2006/relationships">'
+        '<Relationship Id="rId1" '
+        'Type="http://schemas.openxmlformats.org/officeDocument/2006/relationships/officeDocument" '
+        'Target="xl/workbook.xml"/>'
+        "</Relationships>"
+    )
+    workbook_rels_xml = (
+        '<?xml version="1.0" encoding="UTF-8" standalone="yes"?>'
+        '<Relationships xmlns="http://schemas.openxmlformats.org/package/2006/relationships">'
+        '<Relationship Id="rId1" '
+        'Type="http://schemas.openxmlformats.org/officeDocument/2006/relationships/worksheet" '
+        'Target="worksheets/sheet1.xml"/>'
+        '<Relationship Id="rId2" '
+        'Type="http://schemas.openxmlformats.org/officeDocument/2006/relationships/styles" '
+        'Target="styles.xml"/>'
+        "</Relationships>"
+    )
+    styles_xml = (
+        '<?xml version="1.0" encoding="UTF-8" standalone="yes"?>'
+        '<styleSheet xmlns="http://schemas.openxmlformats.org/spreadsheetml/2006/main">'
+        '<fonts count="1"><font><sz val="11"/><name val="Calibri"/></font></fonts>'
+        '<fills count="2"><fill><patternFill patternType="none"/></fill>'
+        '<fill><patternFill patternType="gray125"/></fill></fills>'
+        '<borders count="1"><border><left/><right/><top/><bottom/><diagonal/></border></borders>'
+        '<cellStyleXfs count="1"><xf numFmtId="0" fontId="0" fillId="0" borderId="0"/></cellStyleXfs>'
+        '<cellXfs count="1"><xf numFmtId="0" fontId="0" fillId="0" borderId="0" xfId="0"/></cellXfs>'
+        '<cellStyles count="1"><cellStyle name="Normal" xfId="0" builtinId="0"/></cellStyles>'
+        '<dxfs count="0"/><tableStyles count="0" defaultTableStyle="TableStyleMedium2" '
+        'defaultPivotStyle="PivotStyleLight16"/>'
+        "</styleSheet>"
+    )
+
+    with zipfile.ZipFile(path, "w", zipfile.ZIP_DEFLATED) as zf:
+        zf.writestr("[Content_Types].xml", content_types_xml)
+        zf.writestr("_rels/.rels", root_rels_xml)
+        zf.writestr("xl/workbook.xml", workbook_xml)
+        zf.writestr("xl/_rels/workbook.xml.rels", workbook_rels_xml)
+        zf.writestr("xl/styles.xml", styles_xml)
+        zf.writestr("xl/worksheets/sheet1.xml", sheet_xml)
+
+
+def _build_sheet_xml(headers: list[str], rows: list[list[Any]]) -> str:
+    row_xml = [_excel_row_xml(1, headers)]
+    for row_idx, row_values in enumerate(rows, start=2):
+        row_xml.append(_excel_row_xml(row_idx, row_values))
+
+    max_row = max(1, len(rows) + 1)
+    max_col = max(1, len(headers))
+    dimension = f"A1:{_excel_column_name(max_col)}{max_row}"
+    return (
+        '<?xml version="1.0" encoding="UTF-8" standalone="yes"?>'
+        '<worksheet xmlns="http://schemas.openxmlformats.org/spreadsheetml/2006/main" '
+        'xmlns:r="http://schemas.openxmlformats.org/officeDocument/2006/relationships">'
+        f'<dimension ref="{dimension}"/>'
+        "<sheetViews><sheetView workbookViewId=\"0\"/></sheetViews>"
+        "<sheetFormatPr defaultRowHeight=\"15\"/>"
+        f"<sheetData>{''.join(row_xml)}</sheetData>"
+        "</worksheet>"
+    )
+
+
+def _excel_row_xml(row_idx: int, values: list[Any]) -> str:
+    cells = []
+    for col_idx, value in enumerate(values, start=1):
+        cell_ref = f"{_excel_column_name(col_idx)}{row_idx}"
+        cells.append(_excel_cell_xml(cell_ref, value))
+    return f'<row r="{row_idx}">{"".join(cells)}</row>'
+
+
+def _excel_cell_xml(cell_ref: str, value: Any) -> str:
+    if value is None or value == "":
+        return f'<c r="{cell_ref}"/>'
+
+    try:
+        number = float(value)
+        if math.isfinite(number):
+            return f'<c r="{cell_ref}"><v>{number:.12g}</v></c>'
+    except (TypeError, ValueError):
+        pass
+
+    text = escape(str(value))
+    return f'<c r="{cell_ref}" t="inlineStr"><is><t>{text}</t></is></c>'
+
+
+def _excel_column_name(col_idx: int) -> str:
+    name = ""
+    while col_idx:
+        col_idx, rem = divmod(col_idx - 1, 26)
+        name = chr(65 + rem) + name
+    return name
+
 @safe_stop_image_writer
 def record_loop(    # recording loop
     robot: Robot,
@@ -366,7 +561,11 @@ def record_loop(    # recording loop
 
     timestamp = 0
     start_episode_t = time.perf_counter()
-    episode_created_at = datetime.now().astimezone().isoformat(timespec="seconds")
+    episode_created_dt = datetime.now().astimezone()
+    episode_created_at = episode_created_dt.isoformat(timespec="seconds")
+    record_name = episode_created_dt.strftime("%Y-%m-%d_%H-%M-%S")
+    state_joint_names = _get_state_joint_names(dataset)
+    state_rows: list[list[Any]] = []
     smoothness_enabled = _policy_state_smoothness_enabled(policy)
     smoothness_tracker = ActionSmoothnessTracker() if smoothness_enabled else None
     try:
@@ -386,6 +585,10 @@ def record_loop(    # recording loop
             # observation_frame is later merged into the saved dataset frame.
             if policy is not None or dataset is not None:
                 observation_frame = build_dataset_frame(dataset.features, obs_processed, prefix=OBS_STR)
+                if state_joint_names and OBS_STATE in observation_frame:
+                    state_rows.append(
+                        _state_values_to_row(observation_frame[OBS_STATE], len(state_joint_names))
+                    )
 
             # Policy inference gets its own frame so history state can be added.
             if policy is not None:
@@ -475,6 +678,11 @@ def record_loop(    # recording loop
             timestamp = time.perf_counter() - start_episode_t
 
     finally:
+        _save_record_state_workbook(
+            record_name=record_name,
+            joint_names=state_joint_names,
+            state_rows=state_rows,
+        )
         if smoothness_tracker is not None:
             _save_action_smoothness_summary(
                 dataset=dataset,
