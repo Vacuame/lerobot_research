@@ -64,6 +64,8 @@ class RecoveryAdaptiveChunkingConfig:
     unstable_old_action_weight: float = 0.05
     min_old_action_weight: float = 0.0
     max_old_action_weight: float = 0.9
+    transition_blend_steps: int = 3
+    transition_blend_old_action_weight: float = 0.5
     debug_print_chunks: bool = True
     debug_print_every: int = 1
     debug_print_num_actions: int = 3
@@ -128,6 +130,8 @@ class RecoveryAdaptiveChunkingConfig:
                 "unstable_old_action_weight",
                 "min_old_action_weight",
                 "max_old_action_weight",
+                "transition_blend_steps",
+                "transition_blend_old_action_weight",
                 "debug_print_chunks",
                 "debug_print_every",
                 "debug_print_num_actions",
@@ -189,6 +193,12 @@ class RecoveryAdaptiveChunkingConfig:
                 raise ValueError("Adaptive chunk action uncertainty thresholds cannot be negative.")
             if self.action_uncertainty_low > self.action_uncertainty_high:
                 raise ValueError("`adaptive_action_chunking.action_uncertainty_low` must be <= high.")
+            if self.transition_blend_steps < 0:
+                raise ValueError("`adaptive_action_chunking.transition_blend_steps` cannot be negative.")
+            if not 0 <= self.transition_blend_old_action_weight <= 1:
+                raise ValueError(
+                    "`adaptive_action_chunking.transition_blend_old_action_weight` must be between 0 and 1."
+                )
             if self.debug_print_every <= 0:
                 raise ValueError("`adaptive_action_chunking.debug_print_every` must be positive.")
             if self.debug_print_num_actions < 0 or self.debug_print_action_dims < 0:

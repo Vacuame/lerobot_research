@@ -383,6 +383,7 @@ class RecoveryAdaptiveChunkingController:
         self.previous_chunk_size: int | None = None
         self.latest_decision: AdaptiveActionChunkingDecision | None = None
         self.ensembled_actions: Tensor | None = None
+        self.last_executed_action: Tensor | None = None
         self.prediction_count = 0
         self.execution_count = 0
         self.current_chunk_size = 0
@@ -393,6 +394,7 @@ class RecoveryAdaptiveChunkingController:
         self.previous_chunk_size = None
         self.latest_decision = None
         self.ensembled_actions = None
+        self.last_executed_action = None
         self.prediction_count = 0
         self.execution_count = 0
         self.current_chunk_size = 0
@@ -407,6 +409,14 @@ class RecoveryAdaptiveChunkingController:
         if state.shape[0] != 1:
             return
         self.state_history.append(state[0].float().cpu())
+
+    def observe_executed_action(self, action: Tensor) -> None:
+        action = action.detach()
+        if action.ndim == 1:
+            action = action.unsqueeze(0)
+        if action.shape[0] != 1:
+            return
+        self.last_executed_action = action[0].float().cpu()
 
     def decide(
         self,
@@ -490,6 +500,26 @@ class RecoveryAdaptiveChunkingController:
         if self.ensembled_actions.shape[1] == 0:
             self.ensembled_actions = None
         return action
+
+    def smooth_chunk_transition(self, actions: Tensor) -> Tensor:
+        """Blend the first few actions of a new queued chunk with the last executed action."""
+        if self.last_executed_action is None or actions.ndim != 3 or actions.shape[1] == 0:
+            return actions
+
+        blend_steps = min(max(0, self.config.transition_blend_steps), actions.shape[1])
+        old_weight_max = min(max(self.config.transition_blend_old_action_weight, 0.0), 1.0)
+        if blend_steps == 0 or old_weight_max <= 0:
+            return actions
+
+        last_action = self.last_executed_action.to(device=actions.device, dtype=actions.dtype).view(1, -1)
+        if last_action.shape[-1] != actions.shape[-1]:
+            return actions
+
+        smoothed = actions.clone()
+        for step in range(blend_steps):
+            old_weight = old_weight_max * (1.0 - step / blend_steps)
+            smoothed[:, step] = old_weight * last_action + (1.0 - old_weight) * smoothed[:, step]
+        return smoothed
 
     def debug_prediction(
         self,

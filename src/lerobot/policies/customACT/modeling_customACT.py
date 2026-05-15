@@ -19,6 +19,7 @@ As per Learning Fine-Grained Bimanual Manipulation with Low-Cost Hardware (https
 The majority of changes here involve removing unused code, unifying naming, and adding helpful comments.
 """
 
+import logging
 import math
 from collections import deque
 from collections.abc import Callable
@@ -29,6 +30,7 @@ import numpy as np
 import torch
 import torch.nn.functional as F  # noqa: N812
 import torchvision
+from safetensors.torch import load_file as load_safetensor_file
 from torch import Tensor, nn
 from torchvision.models._utils import IntermediateLayerGetter
 from torchvision.ops.misc import FrozenBatchNorm2d
@@ -36,6 +38,7 @@ from lerobot.policies.dino_act.dino_backbone import DinoV2Backbone
 
 from lerobot.policies.customACT.configuration_customACT import ACTConfig
 from lerobot.policies.pretrained import PreTrainedPolicy
+from lerobot.policies.utils import log_model_loading_keys
 from lerobot.utils.constants import (
     ACTION,
     ACTION_HISTORY,
@@ -105,6 +108,63 @@ class ACTPolicy(PreTrainedPolicy):
             )
 
         self.reset()
+
+    @classmethod
+    def _load_as_safetensor(cls, model: "ACTPolicy", model_file: str, map_location: str, strict: bool) -> "ACTPolicy":
+        state_dict = load_safetensor_file(model_file, device=map_location)
+        state_dict = cls._remap_legacy_recovery_state_dict_keys(model, state_dict)
+        missing_keys, unexpected_keys = model.load_state_dict(state_dict, strict=strict)
+        log_model_loading_keys(missing_keys, unexpected_keys)
+        return model
+
+    @staticmethod
+    def _remap_legacy_recovery_state_dict_keys(
+        model: "ACTPolicy",
+        state_dict: dict[str, Tensor],
+    ) -> dict[str, Tensor]:
+        """Load recovery checkpoints saved before the module rename.
+
+        Older experiments saved the same recovery encoder under
+        ``model.recovery_history_encoder`` with a standalone
+        ``model.recovery_token_pos_embed`` parameter. The current code keeps the
+        encoder and adaptive controller under
+        ``model.recovery_adaptive_chunking_model``. Without this remap the
+        recovery score head is silently left randomly initialized when
+        ``strict=False`` is used for inference.
+        """
+        target_state = model.state_dict()
+        remapped: dict[str, Tensor] = {}
+        remapped_count = 0
+
+        for key, value in state_dict.items():
+            new_key = key
+            if key.startswith("model.recovery_history_encoder."):
+                new_key = key.replace(
+                    "model.recovery_history_encoder.",
+                    "model.recovery_adaptive_chunking_model.",
+                    1,
+                )
+            elif key == "model.recovery_token_pos_embed":
+                new_key = "model.recovery_adaptive_chunking_model.token_pos_embed"
+
+            if new_key != key and new_key in target_state:
+                if tuple(target_state[new_key].shape) == tuple(value.shape):
+                    remapped[new_key] = value
+                    remapped_count += 1
+                    continue
+                logging.warning(
+                    "Skipping legacy recovery checkpoint key remap %s -> %s due to shape mismatch: %s vs %s",
+                    key,
+                    new_key,
+                    tuple(value.shape),
+                    tuple(target_state[new_key].shape),
+                )
+
+            remapped[key] = value
+
+        if remapped_count:
+            logging.info("Remapped %s legacy recovery checkpoint key(s).", remapped_count)
+        return remapped
 
     def get_optim_params(self) -> dict:
         # TODO(aliberts, rcadene): As of now, lr_backbone == lr
@@ -330,6 +390,7 @@ class ACTPolicy(PreTrainedPolicy):
         if max_actions_per_chunk is not None:
             chunk_size = min(chunk_size, max_actions_per_chunk)
         selected_actions = actions[:, :chunk_size]
+        selected_actions = self.adaptive_action_chunker.smooth_chunk_transition(selected_actions)
         self.adaptive_action_chunker.debug_prediction(
             predicted_actions=actions,
             executed_actions=selected_actions,
@@ -374,6 +435,7 @@ class ACTPolicy(PreTrainedPolicy):
                     remaining_actions=remaining,
                     source="temporal_ensemble",
                 )
+                self.adaptive_action_chunker.observe_executed_action(action)
             else:
                 action = self.temporal_ensembler.update(actions)
             self._record_recovery_action(action)
@@ -395,6 +457,7 @@ class ACTPolicy(PreTrainedPolicy):
                 remaining_actions=len(self._action_queue),
                 source="select_action",
             )
+            self.adaptive_action_chunker.observe_executed_action(action)
         self._record_recovery_action(action)
         return action
 
