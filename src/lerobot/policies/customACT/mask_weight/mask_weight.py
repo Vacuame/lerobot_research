@@ -1,84 +1,211 @@
-import torch
-import torch.nn.functional as F
-from torchvision.transforms import GaussianBlur
 from typing import List, Union
 
+import torch
+import torch.nn as nn
+import torch.nn.functional as F
+from torchvision.transforms import GaussianBlur
+
+from lerobot.policies.customACT.mask_weight.configuration_mask_weight import MaskWeightConfig
+
+
+def _odd_kernel_size(kernel_size: int) -> int:
+    kernel_size = max(1, int(kernel_size))
+    return kernel_size if kernel_size % 2 == 1 else kernel_size + 1
+
+
 def yolo_result_to_soft_mask(
-    results: Union[List, object], 
-    kernel_size: int = 7, 
-    sigma: float = 2.0
-):
-    # ================= 1. 统一转为列表格式 =================
+    results: Union[List, object],
+    kernel_size: int = 7,
+    sigma: float = 2.0,
+) -> torch.Tensor:
+    """Convert Ultralytics YOLO results to a confidence-weighted soft mask.
+
+    Returns:
+        Tensor with shape [B, 1, H, W]. Instance masks are preferred; boxes are
+        used as a fallback when segmentation masks are unavailable.
+    """
     if not isinstance(results, list):
         results = [results]
-    
-    B = len(results)
-    
-    # ================= 2. 从第一个 result 获取图像尺寸 =================
-    # YOLO result 对象包含 orig_shape 属性 (H, W)
-    H, W = results[0].orig_shape
-    
-    # ================= 3. 批量生成掩码 =================
-    soft_mask_list = []
-    
+
+    if len(results) == 0:
+        raise ValueError("YOLO results must contain at least one result.")
+
+    height, width = results[0].orig_shape
+    soft_masks = []
+    kernel_size = _odd_kernel_size(kernel_size)
+
     for result in results:
-        # --- 自动检测设备 ---
         if result.masks is not None:
             device = result.masks.data.device
         elif result.boxes is not None:
             device = result.boxes.conf.device
         else:
-            device = torch.device('cpu')
-        
-        # --- 初始化硬掩码 ---
-        hard_mask = torch.zeros((1, H, W), dtype=torch.float32, device=device)
-        
-        # --- 实例分割掩码优先 ---
-        if result.masks is not None:
-            masks = result.masks.data          # [N, h, w]
-            confs = result.boxes.conf          # [N]
-            
+            device = torch.device("cpu")
+
+        hard_mask = torch.zeros((1, height, width), dtype=torch.float32, device=device)
+
+        if result.masks is not None and result.boxes is not None and len(result.masks.data) > 0:
+            masks = result.masks.data.float()
+            confs = result.boxes.conf.to(device=device, dtype=torch.float32)
+
             for i in range(len(masks)):
-                # 插值到原始图像尺寸
                 mask_i = F.interpolate(
-                    masks[i].unsqueeze(0).unsqueeze(0).float(),  # [1, 1, h, w]
-                    size=(H, W),
-                    mode='bilinear',
-                    align_corners=False
-                ).squeeze(0).squeeze(0)          # [H, W]
-                
-                conf_i = confs[i].item()
-                weighted_mask = mask_i * conf_i
-                hard_mask[0] = torch.maximum(hard_mask[0], weighted_mask)
-        
-        # --- 或使用边界框 ---
-        elif result.boxes is not None:
+                    masks[i].unsqueeze(0).unsqueeze(0),
+                    size=(height, width),
+                    mode="bilinear",
+                    align_corners=False,
+                ).squeeze(0).squeeze(0)
+                hard_mask[0] = torch.maximum(hard_mask[0], mask_i * confs[i])
+
+        elif result.boxes is not None and len(result.boxes) > 0:
             boxes = result.boxes
             for i in range(len(boxes)):
-                conf = boxes.conf[i].item()
-                x1, y1, x2, y2 = boxes.xyxy[i].cpu().numpy().astype(int)
-                
-                x1, y1 = max(0, x1), max(0, y1)
-                x2, y2 = min(W, x2), min(H, y2)
-                
-                conf_tensor = torch.tensor(conf, device=device)
-                hard_mask[0, y1:y2, x1:x2] = torch.maximum(
-                    hard_mask[0, y1:y2, x1:x2],
-                    conf_tensor
-                )
-        
-        # --- 高斯模糊平滑 ---
-        if hard_mask.max() > 0:
-            blur = GaussianBlur(kernel_size=kernel_size, sigma=sigma)
-            soft_mask = blur(hard_mask.unsqueeze(0))  # [1, 1, H, W]
-            soft_mask = soft_mask.squeeze(0)          # [1, H, W]
-            soft_mask = torch.clamp(soft_mask, 0, 1)
+                conf = boxes.conf[i].to(device=device, dtype=torch.float32)
+                x1, y1, x2, y2 = boxes.xyxy[i].detach().round().to(torch.int64).tolist()
+
+                x1 = max(0, min(width, x1))
+                x2 = max(0, min(width, x2))
+                y1 = max(0, min(height, y1))
+                y2 = max(0, min(height, y2))
+                if x2 > x1 and y2 > y1:
+                    hard_mask[0, y1:y2, x1:x2] = torch.maximum(hard_mask[0, y1:y2, x1:x2], conf)
+
+        if hard_mask.max() > 0 and kernel_size > 1:
+            blur = GaussianBlur(kernel_size=kernel_size, sigma=float(sigma))
+            soft_mask = blur(hard_mask.unsqueeze(0)).squeeze(0)
+            soft_mask = torch.clamp(soft_mask, 0.0, 1.0)
         else:
             soft_mask = hard_mask
-        
-        soft_mask_list.append(soft_mask)
-    
-    # ================= 4. 堆叠成 Batch =================
-    soft_masks = torch.stack(soft_mask_list, dim=0)  # [B, 1, H, W]
-    
-    return soft_masks
+
+        soft_masks.append(soft_mask)
+
+    return torch.stack(soft_masks, dim=0)
+
+
+class MaskGuidedVisualAdapter(nn.Module):
+    """Inject YOLO-derived spatial priors into projected ACT visual features.
+
+    The adapter keeps the RGB backbone path intact. YOLO masks are used only as
+    intermediate token guidance: spatial mask embeddings, an optional residual
+    target gate, and optional target summary tokens.
+    """
+
+    def __init__(self, dim_model: int, config: MaskWeightConfig):
+        super().__init__()
+        self.config = config
+        self.dim_model = dim_model
+
+        hidden_dim = int(config.adapter_hidden_dim)
+        if config.use_spatial_embedding:
+            self.mask_encoder = nn.Sequential(
+                nn.Conv2d(4, hidden_dim, kernel_size=3, padding=1),
+                nn.GELU(),
+                nn.Conv2d(hidden_dim, dim_model, kernel_size=1),
+            )
+            nn.init.zeros_(self.mask_encoder[-1].weight)
+            nn.init.zeros_(self.mask_encoder[-1].bias)
+        else:
+            self.mask_encoder = None
+
+        if config.use_residual_gate:
+            self.feature_adapter = nn.Sequential(
+                nn.Conv2d(dim_model, dim_model, kernel_size=1),
+                nn.GELU(),
+                nn.Conv2d(dim_model, dim_model, kernel_size=1),
+            )
+            nn.init.normal_(self.feature_adapter[-1].weight, mean=0.0, std=1e-3)
+            nn.init.zeros_(self.feature_adapter[-1].bias)
+            self.gate_scale = nn.Parameter(torch.tensor(float(config.gate_init)))
+        else:
+            self.feature_adapter = None
+            self.register_parameter("gate_scale", None)
+
+        self.num_target_tokens = max(0, int(config.num_target_tokens))
+        if config.use_target_tokens and self.num_target_tokens > 0:
+            self.target_token_proj = nn.Sequential(
+                nn.LayerNorm(dim_model),
+                nn.Linear(dim_model, dim_model),
+                nn.GELU(),
+                nn.Linear(dim_model, dim_model),
+            )
+            nn.init.zeros_(self.target_token_proj[-1].weight)
+            nn.init.zeros_(self.target_token_proj[-1].bias)
+            self.target_token_pos_embed = nn.Parameter(torch.zeros(self.num_target_tokens, 1, dim_model))
+        else:
+            self.target_token_proj = None
+            self.register_parameter("target_token_pos_embed", None)
+
+    def _build_guidance(self, mask: torch.Tensor) -> tuple[torch.Tensor, torch.Tensor, torch.Tensor, torch.Tensor]:
+        target_mask = torch.clamp(mask, 0.0, 1.0)
+
+        if self.training and self.config.mask_dropout_p > 0:
+            keep = torch.rand(
+                target_mask.shape[0],
+                1,
+                1,
+                1,
+                dtype=target_mask.dtype,
+                device=target_mask.device,
+            )
+            keep = (keep >= float(self.config.mask_dropout_p)).to(dtype=target_mask.dtype)
+            target_mask = target_mask * keep
+
+        dilation = max(0, int(self.config.context_dilation))
+        if dilation > 0:
+            kernel_size = 2 * dilation + 1
+            dilated_mask = F.max_pool2d(target_mask, kernel_size=kernel_size, stride=1, padding=dilation)
+        else:
+            dilated_mask = target_mask
+
+        context_mask = torch.clamp(dilated_mask - target_mask, 0.0, 1.0)
+        background_mask = torch.clamp(1.0 - dilated_mask, 0.0, 1.0)
+        confidence_map = target_mask.amax(dim=(2, 3), keepdim=True).expand_as(target_mask)
+        return target_mask, context_mask, background_mask, confidence_map
+
+    @staticmethod
+    def _masked_pool(features: torch.Tensor, mask: torch.Tensor) -> torch.Tensor:
+        weights = torch.clamp(mask, 0.0, 1.0)
+        denom = weights.sum(dim=(2, 3)).clamp(min=1e-6)
+        pooled = (features * weights).sum(dim=(2, 3)) / denom
+        return pooled
+
+    def _make_target_tokens(
+        self,
+        features: torch.Tensor,
+        target_mask: torch.Tensor,
+        context_mask: torch.Tensor,
+        background_mask: torch.Tensor,
+    ) -> tuple[torch.Tensor | None, torch.Tensor | None]:
+        if self.target_token_proj is None:
+            return None, None
+
+        global_mask = torch.ones_like(target_mask)
+        pool_masks = [target_mask, context_mask, target_mask + context_mask, background_mask, global_mask]
+        pooled_tokens = []
+        for i in range(self.num_target_tokens):
+            pool_mask = pool_masks[i] if i < len(pool_masks) else global_mask
+            pooled_tokens.append(self._masked_pool(features, torch.clamp(pool_mask, 0.0, 1.0)))
+        target_tokens = torch.stack(pooled_tokens, dim=0)
+        target_tokens = target_tokens + self.target_token_proj(target_tokens)
+        target_pos_embed = self.target_token_pos_embed.to(dtype=features.dtype, device=features.device)
+        return target_tokens, target_pos_embed
+
+    def forward(self, visual_features: torch.Tensor, mask: torch.Tensor) -> tuple[torch.Tensor, torch.Tensor | None, torch.Tensor | None]:
+        mask = mask.to(dtype=visual_features.dtype, device=visual_features.device)
+        target_mask, context_mask, background_mask, confidence_map = self._build_guidance(mask)
+        guidance = torch.cat([target_mask, context_mask, background_mask, confidence_map], dim=1)
+
+        guided_features = visual_features
+        if self.mask_encoder is not None:
+            guided_features = guided_features + self.mask_encoder(guidance)
+
+        if self.feature_adapter is not None:
+            guided_features = guided_features + self.gate_scale * target_mask * self.feature_adapter(visual_features)
+
+        target_tokens, target_pos_embed = self._make_target_tokens(
+            guided_features,
+            target_mask,
+            context_mask,
+            background_mask,
+        )
+        return guided_features, target_tokens, target_pos_embed

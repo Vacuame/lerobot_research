@@ -45,7 +45,7 @@ from lerobot.policies.dino_act.convnext_frame import ConvNeXtBackbone1
 from lerobot.policies.customACT.segment_understanding.modeling_segment_understanding import SegmentUnderstandingEmbedding
 from lerobot.policies.customACT.segment_understanding.utils.kinematics import SimpleKinematics
 from lerobot.policies.customACT.segment_understanding.utils.yolo_data_processer import YoloDataProcessor
-from lerobot.policies.customACT.mask_weight.mask_weight import yolo_result_to_soft_mask
+from lerobot.policies.customACT.mask_weight.mask_weight import MaskGuidedVisualAdapter, yolo_result_to_soft_mask
 # from lerobot.policies.customACT.segment_understanding.utils.denormalize import denormalize_img_with_mean_stats,denormalize_obs_and_angle_to_rad
 # 由于想要未经初始化的数据，需要用到这个
 from lerobot.processor import PolicyProcessorPipeline
@@ -399,6 +399,15 @@ class ACT(nn.Module):
                 self.encoder_img_feat_input_proj = nn.Conv2d(
                     backbone_model.fc.in_features, config.dim_model, kernel_size=1
                 )
+
+        self.mask_weight_mode = getattr(config.mw_config, "mode", "adapter")
+        if self.config.use_mask_weight and self.mask_weight_mode not in {"adapter", "legacy_multiply"}:
+            raise ValueError(
+                f"Unknown mask_weight mode: {self.mask_weight_mode}. "
+                "Expected 'adapter' or 'legacy_multiply'."
+            )
+        if self.config.image_features and self.config.use_mask_weight and self.mask_weight_mode == "adapter":
+            self.mask_guided_visual_adapter = MaskGuidedVisualAdapter(config.dim_model, config.mw_config)
         
 
 
@@ -614,13 +623,20 @@ class ACT(nn.Module):
                 img = batch[img_key]    # [8, 3, 480, 640]
                 cam_features = self.backbone(img)["feature_map"]    # [8, 3, 480, 640] -> [8, 512, 15, 20]
                 cam_pos_embed = self.encoder_cam_feat_pos_embed(cam_features).to(dtype=cam_features.dtype)
+                yolo_mask = None
+                target_tokens = None
+                target_pos_embed = None
 
                 if self.config.use_mask_weight: # if部分是yolo_mask_weight的内容
                     # 提取mask
                     norm_step:NormalizerProcessorStep = self.preprocessor.steps[3]
                     imgs_for_yolo = norm_step._apply_transform(img, img_key, FeatureType.VISUAL, inverse=True)
                     yolo_results = self.yolo_data_processer.get_yolo_results(imgs_for_yolo)
-                    yolo_mask = yolo_result_to_soft_mask(yolo_results)
+                    yolo_mask = yolo_result_to_soft_mask(
+                        yolo_results,
+                        kernel_size=getattr(self.config.mw_config, "mask_blur_kernel_size", 7),
+                        sigma=getattr(self.config.mw_config, "mask_blur_sigma", 2.0),
+                    )
 
                     # 显示出处理后的图片
                     if (
@@ -633,20 +649,21 @@ class ACT(nn.Module):
                         )
 
                     # 处理mask形状
-                    target_h, target_w = cam_features.shape[-2:]
-                    mask_resized = torch.nn.functional.interpolate(
-                        yolo_mask,
-                        size=(target_h, target_w),
-                        mode='bilinear',
-                        align_corners=False
-                    )
-                    mask_resized = mask_resized.to(dtype=cam_features.dtype, device=cam_features.device)
+                    if self.mask_weight_mode == "legacy_multiply":
+                        target_h, target_w = cam_features.shape[-2:]
+                        mask_resized = torch.nn.functional.interpolate(
+                            yolo_mask,
+                            size=(target_h, target_w),
+                            mode='bilinear',
+                            align_corners=False
+                        )
+                        mask_resized = mask_resized.to(dtype=cam_features.dtype, device=cam_features.device)
 
                     # 用mask处理feature
-                    mask_resized = torch.clamp(mask_resized, 0.0, 1.0) # 确保mask值在合理范围内
-                    alpha = self.config.mw_config.alpha   # alpha
-                    beta = self.config.mw_config.beta     # beta
-                    cam_features = cam_features * (beta + alpha * mask_resized) # 加权融合，增强目标区域特征
+                        mask_resized = torch.clamp(mask_resized, 0.0, 1.0)
+                        alpha = self.config.mw_config.alpha
+                        beta = self.config.mw_config.beta
+                        cam_features = cam_features * (beta + alpha * mask_resized)
                 
                     # from lerobot.debug_tools.img_batch_save import save_im5g_list
                     # save_img_list(img, "testimg/img")
@@ -657,6 +674,21 @@ class ACT(nn.Module):
                 # 投影features到指定维度
                 cam_features = self.encoder_img_feat_input_proj(cam_features)    # [8, 512, 15, 20] -> [8, 512, 15, 20]
 
+                if self.config.use_mask_weight and self.mask_weight_mode == "adapter":
+                    target_h, target_w = cam_features.shape[-2:]
+                    mask_resized = torch.nn.functional.interpolate(
+                        yolo_mask,
+                        size=(target_h, target_w),
+                        mode='bilinear',
+                        align_corners=False
+                    )
+                    mask_resized = mask_resized.to(dtype=cam_features.dtype, device=cam_features.device)
+                    mask_resized = torch.clamp(mask_resized, 0.0, 1.0)
+                    cam_features, target_tokens, target_pos_embed = self.mask_guided_visual_adapter(
+                        cam_features,
+                        mask_resized,
+                    )
+
 
                 # 重新排列features形状
                 cam_features = einops.rearrange(cam_features, "b c h w -> (h w) b c")
@@ -666,6 +698,9 @@ class ACT(nn.Module):
                 # Convert to list to extend properly
                 encoder_in_tokens.extend(list(cam_features))
                 encoder_in_pos_embed.extend(list(cam_pos_embed))
+                if target_tokens is not None:
+                    encoder_in_tokens.extend(list(target_tokens))
+                    encoder_in_pos_embed.extend(list(target_pos_embed))
 
         # Stack all tokens along the sequence dimension.
         encoder_in_tokens = torch.stack(encoder_in_tokens, axis=0)
