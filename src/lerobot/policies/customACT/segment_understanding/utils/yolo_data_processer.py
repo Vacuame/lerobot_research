@@ -1,8 +1,13 @@
-from ultralytics import YOLO
 import cv2
 import numpy as np
 import torch
-from lerobot.policies.customACT.segment_understanding.configuration_segment_understanding import SegmentUnderstandingConfig
+import torch.nn.functional as F
+from ultralytics import YOLO
+
+from lerobot.policies.customACT.segment_understanding.configuration_segment_understanding import (
+    SegmentUnderstandingConfig,
+)
+
 
 class YoloDataProcessor:
     def __init__(self, config: SegmentUnderstandingConfig, device):
@@ -10,10 +15,10 @@ class YoloDataProcessor:
         self.device = device
         self.max_objects = config.max_yolo_objects
         self.yolo = YOLO(config.yolo_path)
-        self.ee_anchor = torch.tensor([0.5, 1.0],device=device)  # 末端锚点位置
+        self.ee_anchor = torch.tensor(config.ee_anchor, dtype=torch.float32, device=device)
 
-    @torch.no_grad() # 使用YOLO时不计算梯度
-    def get_yolo_results(self,frames):
+    @torch.no_grad()
+    def get_yolo_results(self, frames):
         # results = self.yolo.track(
         #     source=frames,
         #     persist=True,
@@ -27,96 +32,160 @@ class YoloDataProcessor:
             verbose=False,
             conf=0.25,
             iou=0.7,
-            device = self.device,
+            device=self.device,
         )
 
-    @torch.no_grad() # 使用YOLO时不计算梯度
-    def get_yolo_data(self, frames):
-        """
-        frames: single image or list of images
-        return:
-            R:      [B, N_max, r_dim]
-            R_mask: [B, N_max]
-        """
-       
-        # results 是一个 list，长度 = batch_size
+    @torch.no_grad()
+    def get_yolo_data(self, frames, mask_size: tuple[int, int] | None = None):
         results = self.get_yolo_results(frames)
+        return self.get_yolo_data_from_results(results, mask_size=mask_size)
 
-        #DEBUG 打印结果
-        # for r in results:
-        #     if r.boxes is not None:
-        #         for box in r.boxes:
-        #             xyxy = box.xyxy[0].cpu().numpy()
-        #             conf = box.conf.item()
-        #             cls_id = int(box.cls.item())
-        #             cls_name = r.names[cls_id]
-        #             print(f"{cls_name}   at {xyxy}     conf={conf:.2f}")
+    @torch.no_grad()
+    def get_yolo_data_from_results(self, results, mask_size: tuple[int, int] | None = None):
+        object_features = []
+        object_masks = []
+        instance_masks = []
 
-        R_list = []
-        mask_list = []
+        for result in results:
+            features_i, mask_i, instance_masks_i = self.process_single_result(result, mask_size=mask_size)
+            object_features.append(features_i)
+            object_masks.append(mask_i)
+            if mask_size is not None:
+                instance_masks.append(instance_masks_i)
 
-        for res in results:
-            R_i, mask_i = self.process_single_result(res)
-            R_list.append(R_i)
-            mask_list.append(mask_i)
+        features = torch.stack(object_features, dim=0)
+        masks = torch.stack(object_masks, dim=0)
 
-        R = torch.stack(R_list, dim=0)        # [B, N_max, r_dim]
-        R_mask = torch.stack(mask_list, dim=0)  # [B, N_max]
-        
-        return R, R_mask
+        if mask_size is None:
+            return features, masks
 
-    def process_single_result(self, result):
+        return features, masks, torch.stack(instance_masks, dim=0)
+
+    def process_single_result(self, result, mask_size: tuple[int, int] | None = None):
         device = self.device
-        ee_anchor = self.ee_anchor.to(device)
+        numeric_dim = self.config.object_numeric_dim
+        feature_dim = 1 + numeric_dim
+
+        features = torch.zeros(self.max_objects, feature_dim, dtype=torch.float32, device=device)
+        valid_mask = torch.zeros(self.max_objects, dtype=torch.bool, device=device)
+        feature_masks = None
+        if mask_size is not None:
+            feature_masks = torch.zeros(
+                self.max_objects,
+                1,
+                mask_size[0],
+                mask_size[1],
+                dtype=torch.float32,
+                device=device,
+            )
 
         if result.boxes is None or len(result.boxes) == 0:
-            R = torch.zeros(self.max_objects, 6, device=device)
-            R_mask = torch.zeros(self.max_objects, dtype=torch.bool, device=device)
-            return R, R_mask
+            return features, valid_mask, feature_masks
 
         boxes = result.boxes
-        xywhn = boxes.xywhn            # [N, 4]
-        obj_xy = xywhn[:, :2]          # [N, 2]
-        cls = boxes.cls                # [N]
-        conf = boxes.conf              # [N]
-        masks = result.masks           # [N, H, W] or None
+        xywhn = boxes.xywhn.to(device=device, dtype=torch.float32)
+        xyxyn = boxes.xyxyn.to(device=device, dtype=torch.float32)
+        cls = boxes.cls.to(device=device, dtype=torch.float32)
+        conf = boxes.conf.to(device=device, dtype=torch.float32)
 
-        delta = obj_xy - ee_anchor     # [N, 2]
+        cx = xywhn[:, 0]
+        cy = xywhn[:, 1]
+        width = xywhn[:, 2].clamp(min=1e-6)
+        height = xywhn[:, 3].clamp(min=1e-6)
+        aspect = (width / height).clamp(max=10.0)
+
+        obj_xy = torch.stack([cx, cy], dim=-1)
+        delta = obj_xy - self.ee_anchor.to(device=device, dtype=torch.float32)
+        dx = delta[:, 0]
+        dy = delta[:, 1]
         dist = torch.norm(delta, dim=1)
-
-        theta = torch.atan2(delta[:, 1], delta[:, 0])
+        theta = torch.atan2(dy, dx)
         sin_theta = torch.sin(theta)
         cos_theta = torch.cos(theta)
 
-        if masks is not None:
-            mask_area = masks.data.float().sum(dim=(1, 2))
-            img_area = masks.data.shape[-1] * masks.data.shape[-2]
-            mask_area_norm = mask_area / img_area
-        else:
-            mask_area_norm = xywhn[:, 2] * xywhn[:, 3]
+        mask_area_norm = self._get_mask_area_norm(result, xywhn, device)
 
-        # [N, 6]
-        R_raw = torch.stack(
+        # [cls, cx, cy, w, h, aspect, dx, dy, dist, sin, cos, conf, area]
+        raw = torch.stack(
             [
                 cls,
+                cx,
+                cy,
+                width,
+                height,
+                aspect,
+                dx,
+                dy,
+                dist,
                 sin_theta,
                 cos_theta,
-                dist,
                 conf,
                 mask_area_norm,
             ],
             dim=1,
         )
 
-        N = min(R_raw.shape[0], self.max_objects)
+        relevance = (
+            conf
+            - float(self.config.anchor_distance_weight) * dist
+            + float(self.config.anchor_area_weight) * mask_area_norm
+        )
+        order = torch.argsort(relevance, descending=True)
+        raw = raw[order]
+        xyxyn = xyxyn[order]
 
-        R = torch.zeros(self.max_objects, 6, device=device)
-        R_mask = torch.zeros(self.max_objects, dtype=torch.bool, device=device)
+        n_objects = min(raw.shape[0], self.max_objects)
+        features[:n_objects] = raw[:n_objects]
+        valid_mask[:n_objects] = True
 
-        R[:N] = R_raw[:N]
-        R_mask[:N] = True
+        if feature_masks is not None:
+            masks = self._get_instance_masks(result, xyxyn, order, mask_size, device)
+            feature_masks[:n_objects] = masks[:n_objects]
 
-        return R.to(device), R_mask.to(device)
+        return features, valid_mask, feature_masks
+
+    def _get_mask_area_norm(self, result, xywhn: torch.Tensor, device: torch.device) -> torch.Tensor:
+        if result.masks is None or len(result.masks.data) == 0:
+            return xywhn[:, 2] * xywhn[:, 3]
+
+        masks = result.masks.data.to(device=device, dtype=torch.float32)
+        mask_area = masks.sum(dim=(1, 2))
+        img_area = masks.shape[-1] * masks.shape[-2]
+        return mask_area / max(float(img_area), 1.0)
+
+    def _get_instance_masks(
+        self,
+        result,
+        xyxyn: torch.Tensor,
+        order: torch.Tensor,
+        mask_size: tuple[int, int],
+        device: torch.device,
+    ) -> torch.Tensor:
+        if result.masks is not None and len(result.masks.data) > 0:
+            masks = result.masks.data.to(device=device, dtype=torch.float32)[order]
+            return F.interpolate(
+                masks.unsqueeze(1),
+                size=mask_size,
+                mode="bilinear",
+                align_corners=False,
+            ).clamp(0.0, 1.0)
+
+        height, width = mask_size
+        masks = torch.zeros(xyxyn.shape[0], 1, height, width, dtype=torch.float32, device=device)
+        scaled_boxes = xyxyn.clone()
+        scaled_boxes[:, [0, 2]] *= width
+        scaled_boxes[:, [1, 3]] *= height
+        scaled_boxes = scaled_boxes.round().to(torch.int64)
+
+        for i, (x1, y1, x2, y2) in enumerate(scaled_boxes.tolist()):
+            x1 = max(0, min(width, x1))
+            x2 = max(0, min(width, x2))
+            y1 = max(0, min(height, y1))
+            y2 = max(0, min(height, y2))
+            if x2 > x1 and y2 > y1:
+                masks[i, 0, y1:y2, x1:x2] = 1.0
+
+        return masks
 
     @staticmethod
     def _tensor_to_uint8_hwc(frame: torch.Tensor) -> np.ndarray:

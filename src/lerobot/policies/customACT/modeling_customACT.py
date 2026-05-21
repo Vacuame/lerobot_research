@@ -433,6 +433,7 @@ class ACT(nn.Module):
             yolo_nc = self.yolo_data_processer.yolo.nc
             config.seg_config.num_classes = yolo_nc
             config.seg_config.output_dim = config.dim_model
+            config.seg_config.fusion_num_heads = config.n_heads
              # 初始化模块
             self.segment_understanding_embedding = SegmentUnderstandingEmbedding(config.seg_config)
         
@@ -451,8 +452,8 @@ class ACT(nn.Module):
         if self.config.n_history_obs_states > 0:# 历史动作token
             n_1d_tokens += 4
 
-        if self.config.use_segment_understanding:# 实例分割理解 token
-            n_1d_tokens += 1
+        if self.config.use_segment_understanding:
+            n_1d_tokens += self.config.seg_config.max_yolo_objects + 2
 
 
         self.encoder_1d_feature_pos_embed = nn.Embedding(n_1d_tokens, config.dim_model)
@@ -569,12 +570,21 @@ class ACT(nn.Module):
         # Prepare transformer encoder inputs.
         encoder_in_tokens = [self.encoder_latent_input_proj(latent_sample)]
         encoder_in_pos_embed = list(self.encoder_1d_feature_pos_embed.weight.unsqueeze(1))
+        encoder_key_padding_mask = [
+            torch.zeros(batch_size, dtype=torch.bool, device=latent_sample.device)
+        ]
         # Robot state token.
         if self.config.robot_state_feature:
             encoder_in_tokens.append(self.encoder_robot_state_input_proj(batch[OBS_STATE]))
+            encoder_key_padding_mask.append(
+                torch.zeros(batch_size, dtype=torch.bool, device=batch[OBS_STATE].device)
+            )
         # Environment state token.
         if self.config.env_state_feature:
             encoder_in_tokens.append(self.encoder_env_state_input_proj(batch[OBS_ENV_STATE]))
+            encoder_key_padding_mask.append(
+                torch.zeros(batch_size, dtype=torch.bool, device=batch[OBS_ENV_STATE].device)
+            )
 
 
         # 新增：调用历史观测状态
@@ -584,24 +594,32 @@ class ACT(nn.Module):
             # print(f"encoder_in_tokens length before adding history_obs_state_embed: {len(encoder_in_tokens)}") # debug 输出添加历史观测状态embedding前encoder_in_tokens的长度:2
             history_obs_state_embed = history_obs_state_embed.permute(1, 0, 2)  # (N, B, D)
             encoder_in_tokens.extend(list(history_obs_state_embed))
+            encoder_key_padding_mask.extend(
+                [
+                    torch.zeros(batch_size, dtype=torch.bool, device=history_obs_state_embed.device)
+                    for _ in range(history_obs_state_embed.shape[0])
+                ]
+            )
             # print(f"encoder_in_tokens length after adding history_obs_state_embed: {len(encoder_in_tokens)}") # debug 输出添加历史观测状态embedding后encoder_in_tokens的长度:6
 
-        # 新增：调用实例分割理解模块
-        if self.config.use_segment_understanding:
-            cam_key = f"observation.images.{self.config.seg_config.camera_name}"
+        segment_tokens = None
+        segment_valid_mask = None
+        segment_camera_key = f"{OBS_IMAGES}.{self.config.seg_config.camera_name}"
+        ee_pose = None
+        norm_step: NormalizerProcessorStep | None = None
+        if self.config.use_yolo or self.config.use_segment_understanding:
+            norm_step = self.preprocessor.steps[3]
 
-            # 反归一化到 [0, 1] 范围，因为act的数据经过了mean-std归一化，不符合YOLO与FK输入需求
-            norm_step:NormalizerProcessorStep = self.preprocessor.steps[3]
-            imgs_for_yolo = norm_step._apply_transform(batch[cam_key], cam_key, FeatureType.VISUAL, inverse=True)
-            obs_state_rad = norm_step._apply_transform(batch[OBS_STATE], OBS_STATE, FeatureType.STATE, inverse=True) * (torch.pi / 180.0) # 1、反归一化 2、度转弧度
-            
-            # 传入YOLO和FK，并得到分割理解的embedding
-            yolo_r, yolo_mask = self.yolo_data_processer.get_yolo_data(imgs_for_yolo)
+        if self.config.use_segment_understanding:
+            obs_state_rad = (
+                norm_step._apply_transform(batch[OBS_STATE], OBS_STATE, FeatureType.STATE, inverse=True)
+                * (torch.pi / 180.0)
+            )
             ee_pose = self.kinematics.forward_kinematics_batch(obs_state_rad)
-            segment_understanding_embed = self.segment_understanding_embedding(yolo_r, yolo_mask , ee_pose) #(B, D)
-            # 最后把embedding放入tokens
-            encoder_in_tokens.append(segment_understanding_embed)
-        
+
+        image_tokens_to_add = []
+        image_pos_embed_to_add = []
+        image_padding_to_add = []
 
         if self.config.image_features:
             # For a list of images, the H and W may vary but H*W is constant.
@@ -614,12 +632,22 @@ class ACT(nn.Module):
                 img = batch[img_key]    # [8, 3, 480, 640]
                 cam_features = self.backbone(img)["feature_map"]    # [8, 3, 480, 640] -> [8, 512, 15, 20]
                 cam_pos_embed = self.encoder_cam_feat_pos_embed(cam_features).to(dtype=cam_features.dtype)
+                yolo_results = None
+                imgs_for_yolo = None
+                needs_segment_tokens = self.config.use_segment_understanding and img_key == segment_camera_key
+                needs_yolo = self.config.use_mask_weight or needs_segment_tokens
+
+                if needs_yolo:
+                    imgs_for_yolo = norm_step._apply_transform(
+                        img,
+                        img_key,
+                        FeatureType.VISUAL,
+                        inverse=True,
+                    )
+                    yolo_results = self.yolo_data_processer.get_yolo_results(imgs_for_yolo)
 
                 if self.config.use_mask_weight: # if部分是yolo_mask_weight的内容
                     # 提取mask
-                    norm_step:NormalizerProcessorStep = self.preprocessor.steps[3]
-                    imgs_for_yolo = norm_step._apply_transform(img, img_key, FeatureType.VISUAL, inverse=True)
-                    yolo_results = self.yolo_data_processer.get_yolo_results(imgs_for_yolo)
                     yolo_mask = yolo_result_to_soft_mask(yolo_results)
 
                     # 显示出处理后的图片
@@ -657,6 +685,20 @@ class ACT(nn.Module):
                 # 投影features到指定维度
                 cam_features = self.encoder_img_feat_input_proj(cam_features)    # [8, 512, 15, 20] -> [8, 512, 15, 20]
 
+                if needs_segment_tokens:
+                    feature_h, feature_w = cam_features.shape[-2:]
+                    yolo_r, yolo_mask, object_visual_masks = self.yolo_data_processer.get_yolo_data_from_results(
+                        yolo_results,
+                        mask_size=(feature_h, feature_w),
+                    )
+                    segment_tokens, segment_valid_mask = self.segment_understanding_embedding(
+                        yolo_r,
+                        yolo_mask,
+                        ee_pose,
+                        cam_features,
+                        object_visual_masks,
+                    )
+
 
                 # 重新排列features形状
                 cam_features = einops.rearrange(cam_features, "b c h w -> (h w) b c")
@@ -664,15 +706,39 @@ class ACT(nn.Module):
 
                 # Extend immediately instead of accumulating and concatenating
                 # Convert to list to extend properly
-                encoder_in_tokens.extend(list(cam_features))
-                encoder_in_pos_embed.extend(list(cam_pos_embed))
+                image_tokens_to_add.extend(list(cam_features))
+                image_pos_embed_to_add.extend(list(cam_pos_embed))
+                image_padding_to_add.extend(
+                    [
+                        torch.zeros(batch_size, dtype=torch.bool, device=cam_features.device)
+                        for _ in range(cam_features.shape[0])
+                    ]
+                )
+
+        if self.config.use_segment_understanding:
+            if segment_tokens is None or segment_valid_mask is None:
+                raise KeyError(f"Segment camera {segment_camera_key!r} was not found in the batch.")
+            segment_tokens = segment_tokens.permute(1, 0, 2)
+            encoder_in_tokens.extend(list(segment_tokens))
+            encoder_key_padding_mask.extend(
+                [~segment_valid_mask[:, i] for i in range(segment_valid_mask.shape[1])]
+            )
+
+        encoder_in_tokens.extend(image_tokens_to_add)
+        encoder_in_pos_embed.extend(image_pos_embed_to_add)
+        encoder_key_padding_mask.extend(image_padding_to_add)
 
         # Stack all tokens along the sequence dimension.
         encoder_in_tokens = torch.stack(encoder_in_tokens, axis=0)
         encoder_in_pos_embed = torch.stack(encoder_in_pos_embed, axis=0)
+        encoder_key_padding_mask = torch.stack(encoder_key_padding_mask, dim=1)
 
         # Forward pass through the transformer modules.
-        encoder_out = self.encoder(encoder_in_tokens, pos_embed=encoder_in_pos_embed)
+        encoder_out = self.encoder(
+            encoder_in_tokens,
+            pos_embed=encoder_in_pos_embed,
+            key_padding_mask=encoder_key_padding_mask,
+        )
         # TODO(rcadene, alexander-soare): remove call to `device` ; precompute and use buffer
         decoder_in = torch.zeros(
             (self.config.chunk_size, batch_size, self.config.dim_model),
@@ -684,6 +750,7 @@ class ACT(nn.Module):
             encoder_out,
             encoder_pos_embed=encoder_in_pos_embed,
             decoder_pos_embed=self.decoder_pos_embed.weight.unsqueeze(1),
+            encoder_key_padding_mask=encoder_key_padding_mask,
         )
 
         # Move back to (B, S, C).
@@ -765,10 +832,15 @@ class ACTDecoder(nn.Module):
         encoder_out: Tensor,
         decoder_pos_embed: Tensor | None = None,
         encoder_pos_embed: Tensor | None = None,
+        encoder_key_padding_mask: Tensor | None = None,
     ) -> Tensor:
         for layer in self.layers:
             x = layer(
-                x, encoder_out, decoder_pos_embed=decoder_pos_embed, encoder_pos_embed=encoder_pos_embed
+                x,
+                encoder_out,
+                decoder_pos_embed=decoder_pos_embed,
+                encoder_pos_embed=encoder_pos_embed,
+                encoder_key_padding_mask=encoder_key_padding_mask,
             )
         if self.norm is not None:
             x = self.norm(x)
@@ -805,6 +877,7 @@ class ACTDecoderLayer(nn.Module):
         encoder_out: Tensor,
         decoder_pos_embed: Tensor | None = None,
         encoder_pos_embed: Tensor | None = None,
+        encoder_key_padding_mask: Tensor | None = None,
     ) -> Tensor:
         """
         Args:
@@ -832,6 +905,7 @@ class ACTDecoderLayer(nn.Module):
             query=self.maybe_add_pos_embed(x, decoder_pos_embed),
             key=self.maybe_add_pos_embed(encoder_out, encoder_pos_embed),
             value=encoder_out,
+            key_padding_mask=encoder_key_padding_mask,
         )[0]  # select just the output, not the attention weights
         x = skip + self.dropout2(x)
         if self.pre_norm:
